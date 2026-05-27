@@ -1,0 +1,19 @@
+# secrets / local env
+.env
+.env.*.local
+
+# python virtualenv (rebuild via: pip install -r requirements.txt)
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# machine-specific Claude Code local settings (hardcoded paths, per-user)
+.claude/settings.local.json
+
+# runtime artifacts
+logs/
+*.log
+docs_cache/
+.DS_Store
