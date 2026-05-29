@@ -16,7 +16,7 @@ import json
 import logging
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +98,70 @@ def _parse_target_price(raw) -> float | None:
         return None
 
 
+# 시트 datetime 파싱용 fallback 포맷.
+# 실제 Apps Script doGet은 Date를 ISO 8601 UTC로 직렬화한다(예: 2026-05-28T23:38:06.000Z)
+# → fromisoformat으로 우선 처리하고, 아래는 수동 입력/로케일 표시값 대비용 fallback.
+_SHEET_DT_FORMATS = (
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%d",
+    "%m/%d/%Y %H:%M:%S",     # 미국 로케일 표시값 (5/29/2026 8:38:06)
+    "%m/%d/%Y %I:%M:%S %p",  # 5/29/2026 8:38:06 AM
+    "%m/%d/%Y %H:%M",
+    "%m/%d/%Y",
+)
+
+
+def _parse_sheet_dt(raw: str) -> datetime:
+    """시트 datetime 문자열을 naive-UTC datetime으로 파싱. 실패 시 datetime.min.
+
+    정렬/비교 일관성을 위해 tz-aware 값은 UTC naive로 정규화한다(전 행이 UTC라 순서 보존).
+    """
+    s = (raw or "").strip()
+    if not s:
+        return datetime.min
+    # ISO 8601 (Apps Script Date 직렬화). 3.11+ fromisoformat은 'Z'·밀리초를 처리한다.
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+    except ValueError:
+        pass
+    for fmt in _SHEET_DT_FORMATS:
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    logger.warning("Unparseable sheet datetime: %r (treated as oldest)", s)
+    return datetime.min
+
+
+def _replay_avg_cost(txns: list[tuple[datetime, str, float, int]]) -> tuple[int, float]:
+    """거래 내역을 시간순으로 재생해 (잔여수량, 이동평균 평단)을 계산한다.
+
+    이동평균법: 매수 시 평단을 가중평균으로 갱신, 매도 시 평단은 유지하고 수량만 차감.
+    잔량이 0 이하가 되면(완전 청산/과매도) 평단을 리셋해, 이후 재매수가
+    새 평단으로 시작하도록 한다. 이렇게 해야 청산됐던 종목 재매수 시
+    과거 매수분이 평단에 섞이지 않는다.
+
+    txns의 첫 원소는 파싱된 datetime이며 이를 기준으로 안정 정렬한다.
+    """
+    qty = 0
+    avg = 0.0
+    for _dt, action, price, q in sorted(txns, key=lambda t: t[0]):
+        if action == "매수":
+            new_qty = qty + q
+            avg = (qty * avg + price * q) / new_qty
+            qty = new_qty
+        elif action == "매도":
+            qty -= q
+            if qty <= 0:  # 완전 청산 → 다음 매수가 새 평단으로 시작
+                qty = 0
+                avg = 0.0
+    return qty, avg
+
+
 def fetch_positions() -> list[dict]:
     """Apps Script doGet으로 시트 전체 받아 ticker별 평단/잔여수량 계산.
 
@@ -135,38 +199,36 @@ def fetch_positions() -> list[dict]:
         slot = agg.setdefault(ticker, {
             "ticker": ticker,
             "name": str(r.get("name") or ticker),
-            "buy_amount_sum": 0.0,
-            "buy_qty_sum": 0,
-            "sell_qty_sum": 0,
+            "txns": [],  # (datetime, action, price, qty) — 시간순 재생용
             "last_buy_reason": "",
             "last_action_dt": "",
             "tp1_price": None,
             "tp2_price": None,
             "sl_price": None,
-            "last_buy_dt": "",
+            "last_buy_dt": datetime.min,
         })
         slot["name"] = str(r.get("name") or slot["name"])
-        dt = str(r.get("datetime") or "")
+        dt_raw = str(r.get("datetime") or "")
+        pdt = _parse_sheet_dt(dt_raw)
+        slot["txns"].append((pdt, action, price, qty))
         if action == "매수":
-            slot["buy_amount_sum"] += price * qty
-            slot["buy_qty_sum"] += qty
             slot["last_buy_reason"] = str(r.get("reason") or "")
-            # 가장 최근 매수 행의 익절/손절가 보존 (사용자가 시트에서 수정한 값 우선)
-            if dt >= slot["last_buy_dt"]:
-                slot["last_buy_dt"] = dt
+            # 가장 최근 매수 행의 익절/손절가 보존 (사용자가 시트에서 수정한 값 우선).
+            # 잔량>0인 포지션의 최근 매수는 항상 현재 보유 분이므로 전체 최근 매수 기준이 맞다.
+            if pdt >= slot["last_buy_dt"]:
+                slot["last_buy_dt"] = pdt
                 slot["tp1_price"] = _parse_target_price(r.get("tp1"))
                 slot["tp2_price"] = _parse_target_price(r.get("tp2"))
                 slot["sl_price"] = _parse_target_price(r.get("sl"))
-        elif action == "매도":
-            slot["sell_qty_sum"] += qty
-        slot["last_action_dt"] = dt or slot["last_action_dt"]
+        slot["last_action_dt"] = dt_raw or slot["last_action_dt"]
 
     positions: list[dict] = []
     for ticker, s in agg.items():
-        remaining = s["buy_qty_sum"] - s["sell_qty_sum"]
+        # 이동평균법으로 시간순 재생: 잔량이 0이 되면 평단을 리셋해
+        # 청산 후 재매수 시 과거 매수분이 평단에 섞이지 않게 한다.
+        remaining, avg_price = _replay_avg_cost(s["txns"])
         if remaining <= 0:
             continue
-        avg_price = s["buy_amount_sum"] / s["buy_qty_sum"] if s["buy_qty_sum"] > 0 else 0
         # 시트 가격 우선, 없으면 평단 × % fallback
         tp1 = s["tp1_price"] if s["tp1_price"] else (avg_price * (1 + TP1_PCT / 100) if avg_price > 0 else None)
         tp2 = s["tp2_price"] if s["tp2_price"] else (avg_price * (1 + TP2_PCT / 100) if avg_price > 0 else None)
