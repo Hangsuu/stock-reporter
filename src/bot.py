@@ -33,6 +33,14 @@ KST = pytz.timezone("Asia/Seoul")
 POLL_TIMEOUT = 30
 MAX_CHOICES = 10
 
+# 봇별로 받을 슬래시 명령. main은 _handle_command의 모든 명령을 받고(필터 X),
+# 나머지 봇은 "main에서 입력했을 때 결과가 그 봇 채널로 가는" 명령만 받는다.
+# 응답은 _handle_command(reply_mode=...)로 입력받은 봇 채널에 회신된다.
+_DEEPDIVE_BOT_COMMANDS = frozenset({"/run"})
+_NOTE_BOT_COMMANDS = frozenset({"/status", "/update", "/retarget"})
+# /status, /check은 모니터 봇 핸들러에서 직접 처리(같은 채널 중복 confirmation 회피).
+_MONITOR_BOT_COMMANDS = frozenset({"/update", "/retarget"})
+
 _listing_cache: dict[str, str] | None = None
 _listing_lock = threading.Lock()
 
@@ -309,9 +317,16 @@ def _try_resolve_or_list(bot_label: str, chat_id: str, text: str, *, reply_mode:
 
 
 # ── 핸들러: 메인 봇 (전체 기능) ─────────────────────────────────────────
-def _handle_command(text: str) -> bool:
+def _handle_command(text: str, reply_mode: str | None = None) -> bool:
+    """슬래시 명령 디스패치. 응답은 reply_mode 봇 채널로 간다 (None=메인).
+
+    호출 측에서 봇별로 허용 명령을 좁히려면 본 함수 호출 전에 미리 cmd를 필터링한다.
+    """
     parts = text.split()
     cmd = parts[0].lower()
+
+    def send(msg: str) -> None:
+        send_message(msg, mode=reply_mode)
 
     if cmd == "/schedule":
         if len(parts) == 2 and parts[1] == "list":
@@ -320,69 +335,69 @@ def _handle_command(text: str) -> bool:
             for s in schedules:
                 lines.append(f"▸ <b>{s['job']:10s}</b> {s['schedule']}")
             lines.append("\n변경: <code>/schedule [us|us_top20|kr|kr_top20|deepdive|insight|chart|macro] HH:MM</code>")
-            send_message("\n".join(lines))
+            send("\n".join(lines))
             return True
         if len(parts) == 3:
             job = parts[1].lower()
             m = re.match(r"^(\d{1,2}):(\d{2})$", parts[2])
             if not m:
-                send_message(f"❌ 시간 형식 오류: <code>{parts[2]}</code>. 'HH:MM' 필요")
+                send(f"❌ 시간 형식 오류: <code>{parts[2]}</code>. 'HH:MM' 필요")
                 return True
             try:
                 result = scheduler.update_schedule(job, int(m.group(1)), int(m.group(2)))
-                send_message(f"✅ <b>{result}</b> 변경 완료")
+                send(f"✅ <b>{result}</b> 변경 완료")
             except Exception as e:
-                send_message(f"❌ <code>{type(e).__name__}: {e}</code>")
+                send(f"❌ <code>{type(e).__name__}: {e}</code>")
             return True
-        send_message(
+        send(
             "사용법:\n<code>/schedule list</code>\n<code>/schedule us 07:00</code>\n<code>/schedule insight 09:30</code>"
         )
         return True
 
     if cmd == "/run":
         if len(parts) != 2:
-            send_message(
+            send(
                 "사용법: <code>/run [us|us_top20|kr|kr_top20|deepdive|insight|chart|macro]</code>"
             )
             return True
         try:
-            send_message(f"⚡ {scheduler.trigger_job(parts[1].lower())}. 결과는 1~3분 내 도착")
+            send(f"⚡ {scheduler.trigger_job(parts[1].lower())}. 결과는 1~3분 내 도착")
         except Exception as e:
-            send_message(f"❌ <code>{type(e).__name__}: {e}</code>")
+            send(f"❌ <code>{type(e).__name__}: {e}</code>")
         return True
 
     if cmd == "/model":
         if len(parts) != 2:
-            send_message("사용법: <code>/model [opus|sonnet|haiku]</code>")
+            send("사용법: <code>/model [opus|sonnet|haiku]</code>")
             return True
         try:
-            send_message(f"✅ {scheduler.update_model(parts[1].lower())}")
+            send(f"✅ {scheduler.update_model(parts[1].lower())}")
         except Exception as e:
-            send_message(f"❌ <code>{type(e).__name__}: {e}</code>")
+            send(f"❌ <code>{type(e).__name__}: {e}</code>")
         return True
 
     if cmd == "/status":
         try:
             from . import monitor as mon
             mon.daily_report()
-            send_message("✅ 포지션 리포트는 모니터 봇 채널로 전송했습니다.")
+            send("✅ 포지션 리포트는 모니터 봇 채널로 전송했습니다.")
         except Exception as e:
-            send_message(f"❌ <code>{type(e).__name__}: {e}</code>")
+            send(f"❌ <code>{type(e).__name__}: {e}</code>")
         return True
 
     if cmd == "/check":
         try:
             from . import monitor as mon
             mon.check_intraday()
-            send_message("✅ 장중 TP/SL 체크 완료. 도달 종목이 있으면 모니터 봇 채널로 알림.")
+            send("✅ 장중 TP/SL 체크 완료. 도달 종목이 있으면 모니터 봇 채널로 알림.")
         except Exception as e:
-            send_message(f"❌ <code>{type(e).__name__}: {e}</code>")
+            send(f"❌ <code>{type(e).__name__}: {e}</code>")
         return True
 
     if cmd == "/update":
         # /update 005930|삼성전자 tp1=320000 sl=295000
         if len(parts) < 3:
-            send_message(
+            send(
                 "사용법: <code>/update 005930 tp1=320000 [tp2=350000] [sl=295000]</code>\n"
                 "또는 종목명: <code>/update 삼성전자 tp1=320000</code>\n"
                 "지정한 키만 수정 (기존 값 보존). 시트는 평단 대비 % 자동 계산."
@@ -391,7 +406,7 @@ def _handle_command(text: str) -> bool:
         ticker_q = parts[1].strip()
         resolved = _resolve_ticker_or_code(ticker_q)
         if not resolved:
-            send_message(f"❌ '<code>{ticker_q}</code>' 종목 찾지 못함")
+            send(f"❌ '<code>{ticker_q}</code>' 종목 찾지 못함")
             return True
         ticker, name = resolved
         kwargs: dict = {}
@@ -407,7 +422,7 @@ def _handle_command(text: str) -> bool:
             if k in ("tp1", "tp2", "sl"):
                 kwargs[k] = v_num
         if not kwargs:
-            send_message("❌ 수정할 키 없음 (tp1=, tp2=, sl= 중 하나 이상 필요)")
+            send("❌ 수정할 키 없음 (tp1=, tp2=, sl= 중 하나 이상 필요)")
             return True
         try:
             from . import monitor as mon
@@ -423,17 +438,17 @@ def _handle_command(text: str) -> bool:
                         p = (v - avg) / avg * 100
                         pct_str = f" ({'+' if p >= 0 else ''}{p:.1f}%)"
                     lines.append(f"   {k.upper()} <b>{int(v):,}원</b>{pct_str}")
-                send_message("\n".join(lines))
+                send("\n".join(lines))
             else:
-                send_message(f"❌ {result.get('error') or '실패'}: <pre>{result}</pre>")
+                send(f"❌ {result.get('error') or '실패'}: <pre>{result}</pre>")
         except Exception as e:
-            send_message(f"❌ <code>{type(e).__name__}: {e}</code>")
+            send(f"❌ <code>{type(e).__name__}: {e}</code>")
         return True
 
     if cmd == "/retarget":
         # /retarget 005930|삼성전자 [tp1_pct tp2_pct sl_pct]
         if len(parts) < 2:
-            send_message(
+            send(
                 "사용법: <code>/retarget 005930</code> (기본 7/15/-5%)\n"
                 "또는 종목명: <code>/retarget 삼성전자 10 20 -3</code>"
             )
@@ -441,7 +456,7 @@ def _handle_command(text: str) -> bool:
         ticker_q = parts[1].strip()
         resolved = _resolve_ticker_or_code(ticker_q)
         if not resolved:
-            send_message(f"❌ '<code>{ticker_q}</code>' 종목 찾지 못함")
+            send(f"❌ '<code>{ticker_q}</code>' 종목 찾지 못함")
             return True
         ticker, name = resolved
         kwargs: dict = {}
@@ -451,7 +466,7 @@ def _handle_command(text: str) -> bool:
                 kwargs["tp2_pct"] = float(parts[3])
                 kwargs["sl_pct"] = float(parts[4])
             except ValueError:
-                send_message("❌ % 값은 숫자여야 합니다. 예: <code>/retarget 삼성전자 10 20 -3</code>")
+                send("❌ % 값은 숫자여야 합니다. 예: <code>/retarget 삼성전자 10 20 -3</code>")
                 return True
         try:
             from . import monitor as mon
@@ -470,22 +485,22 @@ def _handle_command(text: str) -> bool:
                     f"   🎯 TP2 <b>{int(result['tp2']):,}원</b> (현재가 {tp2p:+g}%)",
                     f"   ⚠️ SL <b>{int(result['sl']):,}원</b> (현재가 {slp:+g}%)",
                 ]
-                send_message("\n".join(lines))
+                send("\n".join(lines))
             else:
-                send_message(f"❌ {result.get('error') or '실패'}: <pre>{result}</pre>")
+                send(f"❌ {result.get('error') or '실패'}: <pre>{result}</pre>")
         except Exception as e:
-            send_message(f"❌ <code>{type(e).__name__}: {e}</code>")
+            send(f"❌ <code>{type(e).__name__}: {e}</code>")
         return True
 
     if cmd == "/logs":
         if len(parts) != 2:
-            send_message("사용법: <code>/logs [us|us_top20|kr|kr_top20|deepdive|insight|chart|macro|bot]</code>")
+            send("사용법: <code>/logs [us|us_top20|kr|kr_top20|deepdive|insight|chart|macro|bot]</code>")
             return True
         try:
             content = scheduler.tail_log(parts[1].lower(), lines=15)
-            send_message(f"📜 <b>{parts[1]} 로그 (최근 15줄)</b>\n<pre>{content}</pre>")
+            send(f"📜 <b>{parts[1]} 로그 (최근 15줄)</b>\n<pre>{content}</pre>")
         except Exception as e:
-            send_message(f"❌ <code>{type(e).__name__}: {e}</code>")
+            send(f"❌ <code>{type(e).__name__}: {e}</code>")
         return True
 
     return False
@@ -573,7 +588,7 @@ def _handle_text_consultant(chat_id: str, text: str) -> None:
 
 
 def _handle_text_note(chat_id: str, text: str) -> None:
-    """Note 봇: 매수/매도 기록 → 지표 계산 → 구글 시트."""
+    """Note 봇: 매수/매도 기록 + 시트/포지션 관련 명령 (/status /update /retarget)."""
     text = text.strip()
     if text.lower() in ("/start", "/help", "도움말"):
         send_message(
@@ -586,9 +601,20 @@ def _handle_text_note(chat_id: str, text: str) -> None:
             "<b>자동 처리</b>\n"
             "▸ PER, PBR, ROE(추정), RSI(14) 계산\n"
             "▸ 매수의 경우 1차 익절(+7%) / 2차 익절(+15%) / 손절(-5%) 가격 계산\n"
-            "▸ 구글 시트에 자동 기록",
+            "▸ 구글 시트에 자동 기록\n\n"
+            "<b>명령어</b>\n"
+            "▸ <code>/status</code> — 보유 포지션 평가손익 리포트\n"
+            "▸ <code>/update 005930 tp1=320000 sl=295000</code> — 시트 값 직접 수정\n"
+            "▸ <code>/retarget 005930</code> — TP/SL 재설정 (현재가 기준)\n"
+            "▸ <code>/retarget 삼성전자 10 20 -3</code> — % 직접 지정",
             mode="note",
         )
+        return
+
+    # 슬래시 명령 디스패치: 허용 명령만 _handle_command로 위임 (응답은 Note 채널로)
+    first = text.split(maxsplit=1)[0].lower() if text else ""
+    if first in _NOTE_BOT_COMMANDS:
+        _handle_command(text, reply_mode="note")
         return
 
     from .note_handler import handle_note
@@ -597,13 +623,16 @@ def _handle_text_note(chat_id: str, text: str) -> None:
 
 
 def _handle_text_monitor(chat_id: str, text: str) -> None:
-    """모니터 봇: 명령으로 즉시 포지션·시세 조회."""
+    """모니터 봇: 포지션·시세 조회, TP/SL 체크/수정/재설정."""
     text = text.strip()
     if text.lower() in ("/start", "/help", "도움말"):
         send_message(
             "📡 <b>모니터 봇</b>\n\n"
             "<b>/status</b> — 보유 종목 즉시 평가손익 리포트\n"
-            "<b>/check</b> — TP/SL 도달 즉시 체크 (장중 한정)\n\n"
+            "<b>/check</b> — TP/SL 도달 즉시 체크 (장중 한정)\n"
+            "<b>/update 005930 tp1=320000 sl=295000</b> — 시트 값 직접 수정\n"
+            "<b>/retarget 005930</b> — TP/SL 재설정 (현재가 기준)\n"
+            "<b>/retarget 삼성전자 10 20 -3</b> — % 직접 지정\n\n"
             "자동 일정:\n"
             "▸ 장중 09:00~15:30 매 30분 — TP/SL 도달 알림\n"
             "▸ 평일 16:00 — 일일 평가손익 리포트\n\n"
@@ -626,7 +655,15 @@ def _handle_text_monitor(chat_id: str, text: str) -> None:
         except Exception as e:
             send_message(f"⚠️ <code>{type(e).__name__}: {e}</code>", mode="monitor")
         return
-    send_message("명령어: <code>/status</code>, <code>/check</code>, <code>/help</code>", mode="monitor")
+    # /update, /retarget은 _handle_command로 위임 (응답은 모니터 채널로)
+    first = text.split(maxsplit=1)[0].lower() if text else ""
+    if first in _MONITOR_BOT_COMMANDS:
+        _handle_command(text, reply_mode="monitor")
+        return
+    send_message(
+        "명령어: <code>/status</code>, <code>/check</code>, <code>/update</code>, <code>/retarget</code>, <code>/help</code>",
+        mode="monitor",
+    )
 
 
 def _start_compare(chat_id: str, ticker_a: str, name_a: str, ticker_b: str, name_b: str) -> None:
@@ -661,10 +698,18 @@ def _handle_text_deepdive(chat_id: str, text: str) -> None:
             "<b>분기실적</b>: <code>삼성전자 분기실적</code> → 매출/영업이익/FCF/ROE 비교\n"
             "<b>종토방</b>: <code>삼성전자 종토방</code> → 매수/매도 심리·공포/환희 지수\n"
             "<b>비교</b>: <code>삼성전자 vs SK하이닉스</code> → 사이드바이사이드 분석\n\n"
+            "<b>명령어</b>\n"
+            "▸ <code>/run deepdive</code> — 자동 deep-dive 즉시 실행 (결과는 이 채널로)\n\n"
             "부분 검색 (예: <code>현대</code>) 시 후보 + 번호 선택.\n"
             "분석은 약 1~2분 소요.",
             mode="kr_deepdive",
         )
+        return
+
+    # 슬래시 명령 디스패치: /run 등 (응답은 Deepdive 채널로)
+    first = text.split(maxsplit=1)[0].lower() if text else ""
+    if first in _DEEPDIVE_BOT_COMMANDS:
+        _handle_command(text, reply_mode="kr_deepdive")
         return
 
     # 비교 패턴 우선 처리: "A vs B" / "A 대 B"
