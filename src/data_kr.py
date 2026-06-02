@@ -278,6 +278,94 @@ def collect_kr_top20_snapshot() -> dict[str, list[dict]]:
     return out
 
 
+def collect_top_gainers_context(
+    kospi_gainers: list[dict],
+    kosdaq_gainers: list[dict],
+    top_n: int = 3,
+    news_max: int = 8,
+    board_max_titles: int = 25,
+    board_max_age_days: int = 2,
+) -> list[dict[str, Any]]:
+    """상위 N개 일간 상승 종목(KOSPI+KOSDAQ 합산)에 대해
+    뉴스 헤드라인 + 종토방 최근 게시글 제목을 수집한다.
+
+    상승의 *왜*를 구분 가능하게 하는 컨텍스트:
+      - news: 펀더멘털·이벤트 촉매 (실적, 정책, 해외 이벤트 기대 등)
+      - board_recent_titles: 군중심리/추측성 글의 분포·온도
+
+    동일 종목이 두 시장에 중복 매칭되면 한 번만 잡고, change_pct 내림차순.
+    종토방은 직전 board_max_age_days일 이내 게시글만(과거 정체 글 노이즈 회피).
+    종목별 fetch는 ThreadPoolExecutor로 병렬화해 추가 지연을 ~2~3s로 억제.
+    """
+    # 1) 합치고 ticker dedup, change_pct 내림차순으로 상위 N
+    combined: list[dict] = []
+    seen: set[str] = set()
+    for g in (kospi_gainers or []) + (kosdaq_gainers or []):
+        code = g.get("ticker")
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        combined.append(g)
+    combined.sort(key=lambda x: x.get("change_pct") or 0.0, reverse=True)
+    top = combined[:top_n]
+    if not top:
+        return []
+
+    # 지연 import: data_kr_fundamentals / data_kr_board가 무거운 의존성을 끌고 와
+    # 모듈 로드 시점부터 비용 발생하는 걸 피한다.
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .data_kr_board import fetch_board_posts
+    from .data_kr_fundamentals import fetch_naver_news
+
+    cutoff = (datetime.now(KST) - timedelta(days=board_max_age_days)).strftime("%Y.%m.%d")
+
+    def _enrich(g: dict) -> dict:
+        code = g["ticker"]
+        out: dict[str, Any] = {
+            "ticker": code,
+            "name": g.get("name"),
+            "change_pct": g.get("change_pct"),
+            "close": g.get("close"),
+            "amount": g.get("amount"),
+            "news": [],
+            "board_recent_titles": [],
+        }
+        try:
+            news = fetch_naver_news(code, max_items=news_max) or []
+            out["news"] = [
+                {
+                    "title": n.get("title"),
+                    "days_ago": n.get("days_ago"),
+                    "office": n.get("office"),
+                }
+                for n in news[:news_max]
+                if n.get("title")
+            ]
+        except Exception as e:
+            logger.warning("news fetch failed for %s: %s", code, e)
+        try:
+            posts = fetch_board_posts(code, pages=1) or []
+            # 'YYYY.MM.DD HH:MM' 사전식 비교로 최근 게시글만
+            recent = [
+                {
+                    "date": p.get("date"),
+                    "title": p.get("title"),
+                    "views": p.get("views"),
+                    "up": p.get("up"),
+                }
+                for p in posts
+                if (p.get("date") or "") >= cutoff and p.get("title")
+            ]
+            out["board_recent_titles"] = recent[:board_max_titles]
+        except Exception as e:
+            logger.warning("board fetch failed for %s: %s", code, e)
+        return out
+
+    with ThreadPoolExecutor(max_workers=min(len(top), 4)) as pool:
+        return list(pool.map(_enrich, top))
+
+
 def collect_kr_market_snapshot() -> dict[str, Any]:
     kospi_g, kospi_l = collect_top_movers("KOSPI", 8)
     kosdaq_g, kosdaq_l = collect_top_movers("KOSDAQ", 8)
@@ -292,4 +380,5 @@ def collect_kr_market_snapshot() -> dict[str, Any]:
         "kospi_top_traded": collect_top_traded("KOSPI", 10),
         "kosdaq_top_traded": collect_top_traded("KOSDAQ", 10),
         "usd_krw": _usd_krw(),
+        "top_gainers_context": collect_top_gainers_context(kospi_g, kosdaq_g, top_n=3),
     }
