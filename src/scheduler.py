@@ -24,6 +24,7 @@ JOB_LABELS = {
     "kr_top20": "com.user.stockreporter.kr_top20",
     "deepdive": "com.user.stockreporter.kr_deepdive",
     "insight": "com.user.stockreporter.insight",
+    "radar": "com.user.stockreporter.radar",
     "chart": "com.user.stockreporter.chart_lesson",
     "macro": "com.user.stockreporter.macro",
     "macro_daily": "com.user.stockreporter.macro_daily",
@@ -58,10 +59,13 @@ _WEEKDAY_KO = {0: "일", 1: "월", 2: "화", 3: "수", 4: "목", 5: "금", 6: "�
 
 def _format_schedule(sci) -> str:
     if isinstance(sci, list) and sci:
-        e = sci[0]
         weekdays = sorted({d.get("Weekday") for d in sci if d.get("Weekday") is not None})
+        times = sorted({f"{d.get('Hour', 0):02d}:{d.get('Minute', 0):02d}" for d in sci})
+        times_str = ",".join(times)
+        if not weekdays:  # 요일 없는 멀티타임 (예: radar 매일 08:00,20:00)
+            return f"매일 {times_str}"
         days_str = "평일" if weekdays == [1, 2, 3, 4, 5] else "주" + ",".join(map(str, weekdays))
-        return f"{days_str} {e.get('Hour', 0):02d}:{e.get('Minute', 0):02d}"
+        return f"{days_str} {times_str}"
     if isinstance(sci, dict):
         if "Weekday" in sci:
             wd = _WEEKDAY_KO.get(sci["Weekday"], str(sci["Weekday"]))
@@ -172,7 +176,8 @@ def tail_log(job: str, lines: int = 15) -> str:
         "us": "launchd_us", "us_top20": "launchd_us_top20",
         "kr": "launchd_kr", "kr_top20": "launchd_kr_top20",
         "deepdive": "launchd_kr_deepdive",
-        "insight": "launchd_insight", "chart": "launchd_chart_lesson", "bot": "launchd_bot",
+        "insight": "launchd_insight", "radar": "launchd_radar",
+        "chart": "launchd_chart_lesson", "bot": "launchd_bot",
     }
     if job not in label_to_logname:
         raise ValueError(f"unknown job '{job}'. valid: {sorted(label_to_logname)}")

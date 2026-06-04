@@ -357,7 +357,7 @@ def _handle_command(text: str, reply_mode: str | None = None) -> bool:
     if cmd == "/run":
         if len(parts) != 2:
             send(
-                "사용법: <code>/run [us|us_top20|kr|kr_top20|deepdive|insight|chart|macro]</code>"
+                "사용법: <code>/run [us|us_top20|kr|kr_top20|deepdive|insight|radar|chart|macro]</code>"
             )
             return True
         try:
@@ -494,7 +494,7 @@ def _handle_command(text: str, reply_mode: str | None = None) -> bool:
 
     if cmd == "/logs":
         if len(parts) != 2:
-            send("사용법: <code>/logs [us|us_top20|kr|kr_top20|deepdive|insight|chart|macro|bot]</code>")
+            send("사용법: <code>/logs [us|us_top20|kr|kr_top20|deepdive|insight|radar|chart|macro|bot]</code>")
             return True
         try:
             content = scheduler.tail_log(parts[1].lower(), lines=15)

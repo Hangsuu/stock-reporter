@@ -39,7 +39,7 @@ echo
 
 # Jobs to install. Add/remove labels here; matching templates must exist in launchd/.
 # (macro*, monitor_* templates also exist but are left out of the default schedule.)
-for label in us us_top20 kr kr_top20 kr_deepdive insight chart_lesson bot; do
+for label in us us_top20 kr kr_top20 kr_deepdive insight radar chart_lesson bot; do
   src="$DIR/launchd/com.user.stockreporter.$label.plist"
   dst="$DEST/com.user.stockreporter.$label.plist"
   if [ ! -f "$src" ]; then

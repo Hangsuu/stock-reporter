@@ -15,6 +15,11 @@ _PER_MODE_CREDS: dict[str, tuple[str, str]] = {
     "kr_deepdive": (os.getenv("TELEGRAM_BOT_TOKEN_DEEPDIVE", ""), os.getenv("TELEGRAM_CHAT_ID_DEEPDIVE", "")),
     "kr_compare": (os.getenv("TELEGRAM_BOT_TOKEN_DEEPDIVE", ""), os.getenv("TELEGRAM_CHAT_ID_DEEPDIVE", "")),
     "insight": (os.getenv("TELEGRAM_BOT_TOKEN_INSIGHT", ""), os.getenv("TELEGRAM_CHAT_ID_INSIGHT", "")),
+    # radar(글로벌 레이더): 전용 봇 없으면 insight 채널로, 그것도 없으면 기본 봇으로 fallback
+    "radar": (
+        os.getenv("TELEGRAM_BOT_TOKEN_RADAR", "") or os.getenv("TELEGRAM_BOT_TOKEN_INSIGHT", ""),
+        os.getenv("TELEGRAM_CHAT_ID_RADAR", "") or os.getenv("TELEGRAM_CHAT_ID_INSIGHT", ""),
+    ),
     "chart_lesson": (os.getenv("TELEGRAM_BOT_TOKEN_CHART", ""), os.getenv("TELEGRAM_CHAT_ID_CHART", "")),
     "note": (os.getenv("TELEGRAM_BOT_TOKEN_NOTE", ""), os.getenv("TELEGRAM_CHAT_ID_NOTE", "")),
     "consultant": (os.getenv("TELEGRAM_BOT_TOKEN_CONSULTANT", ""), os.getenv("TELEGRAM_CHAT_ID_CONSULTANT", "")),
