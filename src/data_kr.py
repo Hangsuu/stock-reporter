@@ -246,13 +246,18 @@ KR_TOP20_GROUPS: dict[str, list[tuple[str, str]]] = {
 }
 
 
-def collect_kr_top20_snapshot() -> dict[str, list[dict]]:
-    """카테고리별 한국 시총 상위 20여 종목 시세."""
+def collect_kr_top20_snapshot() -> dict[str, Any]:
+    """카테고리별 한국 시총 상위 20여 종목 시세 + 종토방/뉴스 심리 컨텍스트.
+
+    out[group] = 시세 rows. 추가로 out["sentiment_context"] 에 '오늘 종토방 심리를
+    움직인' 종목 식별 결과를 담는다(collect_top20_sentiment_context 참고).
+    """
     from .data_kr_fundamentals import collect_candidate_pool, fetch_fundamentals
     pool = collect_candidate_pool(top_n=250)
     pool_by_code = {p["ticker"]: p for p in pool}
 
-    out: dict[str, list[dict]] = {}
+    out: dict[str, Any] = {}
+    flat: list[dict] = []  # 종토방 심리 스캔용 평탄화 리스트 (group 라벨 포함)
     for group, members in KR_TOP20_GROUPS.items():
         rows = []
         for code, name in members:
@@ -263,7 +268,7 @@ def collect_kr_top20_snapshot() -> dict[str, list[dict]]:
                 if not f:
                     continue
                 p = f
-            rows.append({
+            row = {
                 "ticker": code,
                 "name": name,
                 "close": p.get("close"),
@@ -273,9 +278,211 @@ def collect_kr_top20_snapshot() -> dict[str, list[dict]]:
                 "foreign_ownership": p.get("foreign_ownership"),
                 "per": p.get("per"),
                 "pbr": p.get("pbr"),
+            }
+            rows.append(row)
+            flat.append({
+                "ticker": code,
+                "name": name,
+                "group": group,
+                "change_pct": row["change_pct"],
+                "market_cap": row["market_cap"],
             })
         out[group] = rows
+    out["sentiment_context"] = collect_top20_sentiment_context(flat)
     return out
+
+
+# ── 종토방·뉴스 심리 컨텍스트 (공용) ──────────────────────────────────────
+# "왜 움직였나"를 촉매(뉴스)와 군중심리(종토방)로 분리하기 위한 공통 수집기.
+# collect_top_gainers_context(일간 상승 상위)와 collect_top20_sentiment_context
+# (시총 상위 고정 리스트)가 같은 fetch 로직을 복붙으로 갈라뜨리지 않도록 단일 소스.
+
+# 종토방 게시 '속도' 임계치 — 시총 대형주는 종토방이 늘 붐벼 절대 게시량(2일 내 N건)
+# 으로는 변별이 안 된다(전부 ~20 포화). 대신 page1(최신 ~20건)이 쌓인 시간 span 으로
+# 회전 속도를 보면 리포트 실행 시각과 무관하게 코호트 안에서 갈린다(실측 09:07 기준
+# 삼성전자 span 0.0h vs KB금융 60.8h). 종목별 평소 baseline 은 운영 데이터 누적 후
+# 측정 기반으로 교체 대상.
+_VELO_MIN_SPAN_H = 0.1          # 20건이 6분 내 → 0으로 나누기 가드 + 속도 상한
+_VELO_HIGH_SPAN_H = 2.0         # 최신 ~20건이 2시간 내에 쌓임 → 고회전(들끓음)
+_VELO_ELEVATED_SPAN_H = 12.0    # 12시간 내 → 보통
+
+# movers 선정(코호트 상대 두 신호의 합집합):
+_PRICE_MOVER_PCT = 2.5          # 대형주가 하루 ±2.5%+ → 가격이 말해주는 무버
+_VELO_OUTLIER_FACTOR = 2.0      # 종토방 속도가 코호트 중앙값의 2배+ → 관심 이상치
+_VELO_OUTLIER_FLOOR = 1.0       # 중앙값이 0에 수렴할 때 적용할 최소 속도(글/시간)
+_MOVERS_CAP = 8                 # 상세(뉴스/제목) 첨부 종목 상한 — 프롬프트 토큰 보호
+
+
+def _fetch_news_and_board(code: str, *, news_max: int) -> tuple[list[dict], list[dict]]:
+    """한 종목의 (뉴스 헤드라인 newest-first, 종토방 page1 원본 글 최신순) 반환.
+
+    뉴스/종토방을 각각 try/except로 감싸 한쪽 실패가 다른 쪽을 죽이지 않게 한다.
+    종토방은 page1(최신 ~20건)을 cutoff 없이 그대로 돌려준다 — 날짜 필터·개수 slice·
+    속도 계산은 호출자 몫(같은 데이터를 속도 측정엔 전부, 출력엔 일부만 쓰기 위함).
+
+    무거운 의존성(data_kr_board/fundamentals)은 모듈 로드가 아니라 첫 호출 때
+    끌어온다(sys.modules 캐시되어 반복 호출 비용은 무시 가능).
+    """
+    from .data_kr_board import fetch_board_posts
+    from .data_kr_fundamentals import fetch_naver_news
+
+    news: list[dict] = []
+    board: list[dict] = []
+    try:
+        raw = fetch_naver_news(code, max_items=news_max) or []
+        news = [
+            {"title": n.get("title"), "days_ago": n.get("days_ago"), "office": n.get("office")}
+            for n in raw[:news_max]
+            if n.get("title")
+        ]
+    except Exception as e:
+        logger.warning("news fetch failed for %s: %s", code, e)
+    try:
+        posts = fetch_board_posts(code, pages=1) or []
+        board = [
+            {"date": p.get("date"), "title": p.get("title"), "views": p.get("views"), "up": p.get("up")}
+            for p in posts
+            if p.get("title")
+        ]
+    except Exception as e:
+        logger.warning("board fetch failed for %s: %s", code, e)
+    return news, board
+
+
+def _parse_board_dt(s: str | None) -> datetime | None:
+    """'YYYY.MM.DD HH:MM' (네이버 종토방, KST naive) → naive datetime. 실패 시 None."""
+    if not s:
+        return None
+    try:
+        return datetime.strptime(s.strip()[:16], "%Y.%m.%d %H:%M")
+    except (ValueError, TypeError):
+        return None
+
+
+def _board_velocity(posts: list[dict], now_naive: datetime) -> dict[str, Any]:
+    """종토방 page1(최신 ~20건) 타임스탬프로 게시 속도를 추정한다.
+
+    posts_per_hr = (n-1)/span — '최신 N건이 쌓인 시간'으로 정규화하므로 리포트
+    실행 시각(개장 직후/마감 후)에 흔들리지 않는다. label 은 span 기준 단계,
+    posts_last_3h 는 보조 색(직전 3시간 체감)으로만 노출한다.
+    """
+    times = sorted(t for t in (_parse_board_dt(p.get("date")) for p in posts) if t)
+    n = len(times)
+    if n < 2:
+        return {"page1_posts": n, "span_hours": None, "posts_per_hr": 0.0,
+                "posts_last_3h": n, "label": "quiet"}
+    span_h = (times[-1] - times[0]).total_seconds() / 3600
+    rate = (n - 1) / max(span_h, _VELO_MIN_SPAN_H)
+    last_3h = sum(1 for t in times if (now_naive - t).total_seconds() <= 3 * 3600)
+    label = ("high" if span_h <= _VELO_HIGH_SPAN_H
+             else "elevated" if span_h <= _VELO_ELEVATED_SPAN_H
+             else "quiet")
+    return {"page1_posts": n, "span_hours": round(span_h, 1), "posts_per_hr": round(rate, 1),
+            "posts_last_3h": last_3h, "label": label}
+
+
+def collect_top20_sentiment_context(
+    rows: list[dict],
+    news_max: int = 6,
+    board_titles_max: int = 12,
+    board_recent_days: int = 2,
+    max_workers: int = 8,
+) -> dict[str, Any]:
+    """시총 상위 고정 ~20종목을 전부 훑어 '오늘 종토방 심리가 움직인' 종목을
+    식별(movers)하고 나머지(quiet)와 분리한다.
+
+    대형주는 종토방이 늘 붐비고 당일 뉴스도 매일 있어, 절대 임계로는 20종목이 전부
+    무버로 잡혀 식별이 무의미해진다. 그래서 *코호트 상대* 두 신호의 합집합으로 고른다:
+      1) 가격 이상치: |change_pct| >= _PRICE_MOVER_PCT (시장이 내린 '뭔가 있었다' 판정)
+      2) 관심 이상치: 종토방 게시 속도가 코호트 중앙값의 _VELO_OUTLIER_FACTOR배+ 이고
+         속도 label=high — 가격은 잠잠해도 군중이 먼저 들끓는(심리 선행) 케이스 포착
+    (강한가격 → |chg| → 속도 → 당일뉴스) 순 정렬 후 _MOVERS_CAP 개로 제한한다.
+    movers 에만 뉴스/게시글 제목 상세를 붙이고 quiet 은 요약 신호만 남겨 토큰을 아낀다.
+    조용한 장이면 movers 가 적거나 비고 — 프롬프트가 "조용한 장"으로 처리한다.
+
+    20종목 × (뉴스 + 종토방 page1) fetch 를 ThreadPoolExecutor 로 병렬화(추가 ~3~5s).
+    """
+    import statistics
+
+    rows = [r for r in (rows or []) if r.get("ticker")]
+    now = datetime.now(KST)
+    if not rows:
+        return {"as_of": now.strftime("%Y-%m-%d %H:%M KST"), "movers": [], "quiet": []}
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    now_naive = now.replace(tzinfo=None)
+    recent_cutoff = (now - timedelta(days=board_recent_days)).strftime("%Y.%m.%d")
+
+    def _enrich(idx_row: tuple[int, dict]) -> dict:
+        idx, r = idx_row
+        code = r["ticker"]
+        news, board = _fetch_news_and_board(code, news_max=news_max)
+        velocity = _board_velocity(board, now_naive)
+        today_news = [n for n in news if n.get("days_ago") == 0]
+        # 최근 board_recent_days일 글 중 조회수 상위 — '무엇이 먹혔나' 신호
+        recent = [p for p in board if (p.get("date") or "") >= recent_cutoff]
+        board_top = sorted(recent, key=lambda p: p.get("views") or 0, reverse=True)
+        return {
+            "_idx": idx,
+            "ticker": code,
+            "name": r.get("name"),
+            "group": r.get("group"),
+            "change_pct": r.get("change_pct") or 0.0,
+            "market_cap": r.get("market_cap"),
+            "board": velocity,
+            "today_news_count": len(today_news),
+            "_news": news,            # 내부용 — mover 에만 노출
+            "_board_top": board_top,  # 내부용 — mover 에만 노출
+        }
+
+    with ThreadPoolExecutor(max_workers=min(len(rows), max_workers)) as pool:
+        enriched = list(pool.map(_enrich, enumerate(rows)))
+
+    rates = [e["board"]["posts_per_hr"] for e in enriched]
+    vel_med = statistics.median(rates) if rates else 0.0
+    vel_threshold = max(_VELO_OUTLIER_FACTOR * vel_med, _VELO_OUTLIER_FLOOR)
+
+    def _mover_reason(e: dict) -> list[str]:
+        reason: list[str] = []
+        if abs(e["change_pct"]) >= _PRICE_MOVER_PCT:
+            reason.append("price")
+        b = e["board"]
+        if b["label"] == "high" and b["posts_per_hr"] >= vel_threshold:
+            reason.append("board")
+        return reason
+
+    for e in enriched:
+        e["mover_reason"] = _mover_reason(e)
+
+    movers = [e for e in enriched if e["mover_reason"]]
+    movers.sort(
+        key=lambda e: (
+            abs(e["change_pct"]) >= _PRICE_MOVER_PCT,   # 강한 가격 무버 먼저
+            abs(e["change_pct"]),
+            e["board"]["posts_per_hr"],
+            e["today_news_count"],
+        ),
+        reverse=True,
+    )
+    movers = movers[:_MOVERS_CAP]
+    mover_idx = {e["_idx"] for e in movers}
+
+    def _public(e: dict, *, detailed: bool) -> dict:
+        out = {
+            "ticker": e["ticker"], "name": e["name"], "group": e["group"],
+            "change_pct": e["change_pct"], "market_cap": e["market_cap"],
+            "board": e["board"], "today_news_count": e["today_news_count"],
+        }
+        if detailed:
+            out["mover_reason"] = e["mover_reason"]
+            out["news"] = e["_news"]
+            out["board_top_titles"] = e["_board_top"][:board_titles_max]
+        return out
+
+    movers_out = [_public(e, detailed=True) for e in movers]
+    quiet_out = [_public(e, detailed=False) for e in enriched if e["_idx"] not in mover_idx]
+    return {"as_of": now.strftime("%Y-%m-%d %H:%M KST"), "movers": movers_out, "quiet": quiet_out}
 
 
 def collect_top_gainers_context(
@@ -311,56 +518,24 @@ def collect_top_gainers_context(
     if not top:
         return []
 
-    # 지연 import: data_kr_fundamentals / data_kr_board가 무거운 의존성을 끌고 와
-    # 모듈 로드 시점부터 비용 발생하는 걸 피한다.
     from concurrent.futures import ThreadPoolExecutor
-
-    from .data_kr_board import fetch_board_posts
-    from .data_kr_fundamentals import fetch_naver_news
 
     cutoff = (datetime.now(KST) - timedelta(days=board_max_age_days)).strftime("%Y.%m.%d")
 
     def _enrich(g: dict) -> dict:
         code = g["ticker"]
-        out: dict[str, Any] = {
+        news, board = _fetch_news_and_board(code, news_max=news_max)
+        # 'YYYY.MM.DD HH:MM' 사전식 비교로 최근 게시글만 (zero-padded라 안전)
+        recent = [p for p in board if (p.get("date") or "") >= cutoff]
+        return {
             "ticker": code,
             "name": g.get("name"),
             "change_pct": g.get("change_pct"),
             "close": g.get("close"),
             "amount": g.get("amount"),
-            "news": [],
-            "board_recent_titles": [],
+            "news": news[:news_max],
+            "board_recent_titles": recent[:board_max_titles],
         }
-        try:
-            news = fetch_naver_news(code, max_items=news_max) or []
-            out["news"] = [
-                {
-                    "title": n.get("title"),
-                    "days_ago": n.get("days_ago"),
-                    "office": n.get("office"),
-                }
-                for n in news[:news_max]
-                if n.get("title")
-            ]
-        except Exception as e:
-            logger.warning("news fetch failed for %s: %s", code, e)
-        try:
-            posts = fetch_board_posts(code, pages=1) or []
-            # 'YYYY.MM.DD HH:MM' 사전식 비교로 최근 게시글만
-            recent = [
-                {
-                    "date": p.get("date"),
-                    "title": p.get("title"),
-                    "views": p.get("views"),
-                    "up": p.get("up"),
-                }
-                for p in posts
-                if (p.get("date") or "") >= cutoff and p.get("title")
-            ]
-            out["board_recent_titles"] = recent[:board_max_titles]
-        except Exception as e:
-            logger.warning("board fetch failed for %s: %s", code, e)
-        return out
 
     with ThreadPoolExecutor(max_workers=min(len(top), 4)) as pool:
         return list(pool.map(_enrich, top))
