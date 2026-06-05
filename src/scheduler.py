@@ -25,6 +25,7 @@ JOB_LABELS = {
     "deepdive": "com.user.stockreporter.kr_deepdive",
     "insight": "com.user.stockreporter.insight",
     "radar": "com.user.stockreporter.radar",
+    "pulse": "com.user.stockreporter.pulse",
     "chart": "com.user.stockreporter.chart_lesson",
     "macro": "com.user.stockreporter.macro",
     "macro_daily": "com.user.stockreporter.macro_daily",
@@ -177,6 +178,7 @@ def tail_log(job: str, lines: int = 15) -> str:
         "kr": "launchd_kr", "kr_top20": "launchd_kr_top20",
         "deepdive": "launchd_kr_deepdive",
         "insight": "launchd_insight", "radar": "launchd_radar",
+        "pulse": "launchd_pulse",
         "chart": "launchd_chart_lesson", "bot": "launchd_bot",
     }
     if job not in label_to_logname:

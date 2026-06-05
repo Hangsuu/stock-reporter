@@ -557,3 +557,134 @@ def collect_kr_market_snapshot() -> dict[str, Any]:
         "usd_krw": _usd_krw(),
         "top_gainers_context": collect_top_gainers_context(kospi_g, kosdaq_g, top_n=3),
     }
+
+
+# 시장 급변 원인 추적(pulse)용 글로벌 지표 패널.
+# (티커, 한글명, 카테고리, |급변| 이상치 임계 %). 한국 장중엔 미국 '선물'과 아시아
+# 지수가 가장 라이브한 신호다(현물 VIX·SPY는 미국 휴장 중 전일값이라 stale). 임계는
+# '하루치로는 큰 편'인 카테고리별 대략값 — 정밀 baseline은 운영 데이터로 교체 대상.
+_PULSE_INDICATORS: list[tuple[str, str, str, float]] = [
+    ("ES=F", "S&P500 선물", "미국선물", 1.5),
+    ("NQ=F", "나스닥100 선물", "미국선물", 1.8),
+    ("YM=F", "다우 선물", "미국선물", 1.3),
+    ("^N225", "닛케이225", "아시아지수", 2.0),
+    ("^HSI", "항셍", "아시아지수", 2.0),
+    ("000001.SS", "상해종합", "아시아지수", 1.8),
+    ("^VIX", "VIX 변동성", "변동성", 8.0),
+    ("^TNX", "미 10년물 금리", "금리", 3.0),
+    ("DX-Y.NYB", "달러인덱스 DXY", "환율", 0.7),
+    ("KRW=X", "원/달러", "환율", 0.7),
+    ("JPY=X", "엔/달러", "환율", 0.8),
+    ("CL=F", "WTI 유가", "원자재", 3.0),
+    ("GC=F", "금", "원자재", 2.0),
+    ("BTC-USD", "비트코인", "코인", 4.0),
+    ("HYG", "하이일드채권", "신용", 1.2),
+    ("TLT", "미 장기국채", "채권", 1.5),
+]
+
+# 시장 전체 루머/심리 센서: 지수형 ETF·대장주 종토방엔 개별 기업이 아니라
+# '시장 방향' 찌라시·패닉이 몰린다.
+_PULSE_CHATTER_BOARDS: list[tuple[str, str]] = [
+    ("122630", "KODEX 레버리지"),         # KOSPI 2x — 상승 베팅 군중
+    ("252670", "KODEX 200선물인버스2X"),  # 곱버스 — 하락 베팅·패닉 군중
+    ("005930", "삼성전자"),               # 시총 1위 대장주 — 시장 전반 화두
+]
+
+
+def _collect_market_chatter(now: datetime) -> list[dict[str, Any]]:
+    """지수형 ETF·대장주 종토방의 '오늘' 인기글 — 시장 전반 루머/심리(찌라시) 센서."""
+    from .data_kr_board import fetch_board_posts
+    cutoff = now.strftime("%Y.%m.%d")  # 오늘 글만 (사전식 비교)
+    out: list[dict[str, Any]] = []
+    for code, name in _PULSE_CHATTER_BOARDS:
+        try:
+            posts = fetch_board_posts(code, pages=1) or []
+        except Exception as e:
+            logger.warning("chatter fetch failed %s: %s", code, e)
+            posts = []
+        today = [p for p in posts if (p.get("date") or "") >= cutoff and p.get("title")]
+        today.sort(key=lambda p: p.get("views") or 0, reverse=True)
+        out.append({
+            "name": name,
+            "code": code,
+            "today_posts": len(today),
+            "top_titles": [
+                {"title": p.get("title"), "views": p.get("views"), "up": p.get("up")}
+                for p in today[:8]
+            ],
+        })
+    return out
+
+
+def collect_market_pulse_snapshot() -> dict[str, Any]:
+    """온디맨드 '시장 급변 원인 추적'용 스냅샷.
+
+    일일 마감 복기가 아니다. *지금* 시장 전체가 급락/급등하는 '아직 모르는 원인'을
+    찾기 위한 도구다. 종목 개별 영향이 아니라 시장 전체 관점에서 모은다:
+      (1) breadth — 전체가 무너지는지(매크로) 일부 섹터인지(테마) 가르는 폭 지표
+      (2) global_indicators — 글로벌 지표 패널 + 이상치 플래그(무엇이 이상한가)
+      (3) market_chatter — 지수형 ETF·대장주 종토방의 시장 루머(찌라시)
+      (4) leading_movers — '무엇이 끌고 가나' 힌트만(개별 분석 아님)
+    실제 '왜'는 분석 단계에서 web_search(속보 뉴스)와 대조해 규명한다.
+    """
+    now = datetime.now(KST)
+    import math
+
+    from .data_us import _bulk_quotes
+
+    # 1) 시장 폭 — 전체 vs 일부를 가르는 핵심 신호
+    breadth: dict[str, Any] = {}
+    try:
+        ch = _krx_listing()["ChagesRatio"].dropna()
+        breadth = {
+            "total": int(len(ch)),
+            "advancers": int((ch > 0).sum()),
+            "decliners": int((ch < 0).sum()),
+            "limit_up": int((ch >= 29.5).sum()),
+            "limit_down": int((ch <= -29.5).sum()),
+            "up_over_5pct": int((ch >= 5).sum()),
+            "down_over_5pct": int((ch <= -5).sum()),
+            "avg_change_pct": round(float(ch.mean()), 2),
+        }
+    except Exception as e:
+        logger.warning("breadth calc failed: %s", e)
+
+    # 2) 글로벌 지표 패널 + 이상치 플래그(카테고리별 임계 |%|)
+    quotes = _bulk_quotes([t for t, _, _, _ in _PULSE_INDICATORS], period="5d")
+    indicators: list[dict[str, Any]] = []
+    for ticker, name, category, threshold in _PULSE_INDICATORS:
+        q = quotes.get(ticker)
+        if not q:
+            continue
+        cp = q.get("change_pct")
+        if cp is None or (isinstance(cp, float) and math.isnan(cp)):
+            continue  # 데이터 결손(예: 거래일 1개만 잡힘) → 패널에서 제외
+        indicators.append({
+            "ticker": ticker, "name": name, "category": category,
+            "close": q.get("close"), "change_pct": round(cp, 2),
+            "abnormal": abs(cp) >= threshold,
+        })
+    indicators.sort(key=lambda r: (r["abnormal"], abs(r.get("change_pct") or 0.0)), reverse=True)
+
+    # 3) 시장 루머(찌라시) 센서
+    chatter = _collect_market_chatter(now)
+
+    # 4) 주도주 힌트 — 종목 분석이 아니라 '무엇이 끌고 가나'만 (이름+%+시장)
+    kospi_g, kospi_l = collect_top_movers("KOSPI", 6)
+    kosdaq_g, kosdaq_l = collect_top_movers("KOSDAQ", 6)
+
+    def _slim(rows: list[dict], mkt: str) -> list[dict]:
+        return [{"name": r.get("name"), "change_pct": r.get("change_pct"), "market": mkt} for r in rows]
+
+    return {
+        "now_kst": now.strftime("%Y-%m-%d (%A) %H:%M KST"),
+        "kr_indices": collect_index_summary(),
+        "usd_krw": _usd_krw(),
+        "breadth": breadth,
+        "global_indicators": indicators,
+        "market_chatter": chatter,
+        "leading_movers": {
+            "top_losers": _slim(kospi_l, "KOSPI") + _slim(kosdaq_l, "KOSDAQ"),
+            "top_gainers": _slim(kospi_g, "KOSPI") + _slim(kosdaq_g, "KOSDAQ"),
+        },
+    }

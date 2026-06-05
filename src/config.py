@@ -12,6 +12,8 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 _PER_MODE_CREDS: dict[str, tuple[str, str]] = {
     "us": (os.getenv("TELEGRAM_BOT_TOKEN_US", ""), os.getenv("TELEGRAM_CHAT_ID_US", "")),
     "kr": (os.getenv("TELEGRAM_BOT_TOKEN_KR", ""), os.getenv("TELEGRAM_CHAT_ID_KR", "")),
+    # pulse(시장 급변 원인 추적): 한국 시장 리포트와 같은 KR 채널로
+    "pulse": (os.getenv("TELEGRAM_BOT_TOKEN_KR", ""), os.getenv("TELEGRAM_CHAT_ID_KR", "")),
     "kr_deepdive": (os.getenv("TELEGRAM_BOT_TOKEN_DEEPDIVE", ""), os.getenv("TELEGRAM_CHAT_ID_DEEPDIVE", "")),
     "kr_compare": (os.getenv("TELEGRAM_BOT_TOKEN_DEEPDIVE", ""), os.getenv("TELEGRAM_CHAT_ID_DEEPDIVE", "")),
     "insight": (os.getenv("TELEGRAM_BOT_TOKEN_INSIGHT", ""), os.getenv("TELEGRAM_CHAT_ID_INSIGHT", "")),

@@ -357,7 +357,8 @@ def _handle_command(text: str, reply_mode: str | None = None) -> bool:
     if cmd == "/run":
         if len(parts) != 2:
             send(
-                "사용법: <code>/run [us|us_top20|kr|kr_top20|deepdive|insight|radar|chart|macro]</code>"
+                "사용법: <code>/run [us|us_top20|kr|kr_top20|deepdive|insight|radar|pulse|chart|macro]</code>\n"
+                "  • <b>pulse</b> = 지금 시장 급변(급락/급등) 원인 추적 — 지표·속보·찌라시 분석"
             )
             return True
         try:
@@ -494,7 +495,7 @@ def _handle_command(text: str, reply_mode: str | None = None) -> bool:
 
     if cmd == "/logs":
         if len(parts) != 2:
-            send("사용법: <code>/logs [us|us_top20|kr|kr_top20|deepdive|insight|radar|chart|macro|bot]</code>")
+            send("사용법: <code>/logs [us|us_top20|kr|kr_top20|deepdive|insight|radar|pulse|chart|macro|bot]</code>")
             return True
         try:
             content = scheduler.tail_log(parts[1].lower(), lines=15)
@@ -525,6 +526,7 @@ def _handle_text_main(chat_id: str, text: str) -> None:
             "▸ <code>/schedule list</code> — 자동 일정\n"
             "▸ <code>/schedule us 07:00</code> — 시간 변경\n"
             "▸ <code>/run insight</code> — 즉시 실행\n"
+            "▸ <code>/run pulse</code> — 지금 시장 급변(급락/급등) 원인 추적\n"
             "▸ <code>/model sonnet</code> — 모델 변경\n"
             "▸ <code>/logs deepdive</code> — 로그 마지막\n\n"
             "<b>자동 발송</b>\n"

@@ -59,6 +59,7 @@ def _build_header(market: str, extra: str = "") -> str:
         "kr_board": "💬 <b>종토방 분위기</b>",
         "insight": "💡 <b>오늘의 투자 인사이트</b>",
         "radar": "🛰️ <b>글로벌 레이더</b>",
+        "pulse": "🚨 <b>시장 급변 원인 추적</b>",
         "chart_lesson": "📈 <b>오늘의 차트 강의</b>",
         "macro": "🌐 <b>향후 2주 매크로 캘린더</b>",
         "macro_daily": "📡 <b>매크로 지표 데일리</b>",
@@ -372,8 +373,8 @@ def run(
 ) -> str | None:
     config.assert_env()
 
-    # insight·radar·chart_lesson·macro는 주말에도 실행 (학습/브리핑 콘텐츠 / 일요일 위클리)
-    weekend_skipped_modes = ("insight", "radar", "chart_lesson", "macro")
+    # insight·radar·pulse·chart_lesson·macro는 주말에도 실행 (학습/브리핑/온디맨드)
+    weekend_skipped_modes = ("insight", "radar", "pulse", "chart_lesson", "macro")
     if config.WEEKDAY_ONLY and not skip_weekend_check and not _is_weekday() and market not in weekend_skipped_modes:
         logger.info("주말이라 스킵 (WEEKDAY_ONLY=true)")
         return None
@@ -456,6 +457,10 @@ def run(
             "is_weekend": now.weekday() >= 5,
         }
         analysis = analyze("radar", snapshot, user_note=user_note)
+    elif market == "pulse":
+        from .data_kr import collect_market_pulse_snapshot
+        snapshot = collect_market_pulse_snapshot()
+        analysis = analyze("pulse", snapshot, user_note=user_note)
     elif market == "chart_lesson":
         return _run_chart_lesson(dry_run=dry_run, user_note=user_note)
     elif market == "macro_daily":
@@ -519,8 +524,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Send a daily stock market report to Telegram.")
     parser.add_argument(
         "market",
-        choices=["us", "us_top20", "kr", "kr_top20", "kr_deepdive", "kr_quarterly", "kr_board", "insight", "radar", "chart_lesson", "macro", "macro_daily"],
-        help="us=미국, us_top20, kr=한국, kr_top20, kr_deepdive=종목 분석, kr_quarterly=분기실적, kr_board=종토방, insight, radar=글로벌 레이더, chart_lesson",
+        choices=["us", "us_top20", "kr", "kr_top20", "kr_deepdive", "kr_quarterly", "kr_board", "insight", "radar", "pulse", "chart_lesson", "macro", "macro_daily"],
+        help="us=미국, us_top20, kr=한국, kr_top20, kr_deepdive=종목 분석, kr_quarterly=분기실적, kr_board=종토방, insight, radar=글로벌 레이더, pulse=시장 급변 원인 추적, chart_lesson",
     )
     parser.add_argument("--dry-run", action="store_true", help="콘솔에만 출력, 텔레그램 전송 안 함")
     parser.add_argument("--force", action="store_true", help="주말이어도 실행")

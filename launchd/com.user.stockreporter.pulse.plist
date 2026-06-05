@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.stockreporter.pulse</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PROJECT_DIR__/scripts/run.sh</string>
+        <string>pulse</string>
+    </array>
+
+    <!-- 온디맨드 전용: 스케줄(StartCalendarInterval) 없음. /run pulse → launchctl
+         kickstart 로만 실행된다. RunAtLoad 미설정이라 load 해도 자동 실행 안 됨. -->
+
+    <key>WorkingDirectory</key>
+    <string>__PROJECT_DIR__</string>
+
+    <key>StandardOutPath</key>
+    <string>__PROJECT_DIR__/logs/launchd_pulse.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__PROJECT_DIR__/logs/launchd_pulse.err</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__NODE_BIN_DIR__:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <key>LANG</key>
+        <string>ko_KR.UTF-8</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>
