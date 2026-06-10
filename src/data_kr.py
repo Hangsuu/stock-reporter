@@ -9,9 +9,12 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
+import io
+
 import FinanceDataReader as fdr
 import pandas as pd
 import pytz
+import requests
 import yfinance as yf
 
 logger = logging.getLogger(__name__)
@@ -53,14 +56,85 @@ def collect_index_summary() -> list[dict]:
     return result
 
 
+# KRX 전종목 시세 목록.
+#
+# fdr.StockListing("KRX")는 2026년 들어 깨졌다. KRX가 getJsonData/OTP 엔드포인트를
+# 세션 없는 요청에 "LOGOUT"으로 차단하고, FDR이 폴백으로 쓰는 커뮤니티 GitHub 캐시
+# (fdr_krx_data_cache)는 "오늘 날짜" CSV가 아직 없으면 그대로 404를 던지기 때문이다.
+# (참고: 캐시는 1~3 거래일 지연되어 갱신된다.)
+#
+# 그래서 캐시를 직접 읽되, 최신 영업일부터 과거로 거슬러 올라가며 존재하는 가장 최근
+# 스냅샷을 찾는다. 무인증으로 전종목(이름↔코드 포함) 목록을 얻을 수 있는 사실상 유일한
+# 경로다. 종목명↔코드 매핑(bot/note_handler)과 시총·등락률 랭킹(reporter)이 모두 의존한다.
+_KRX_WORKDATE_URL = (
+    "https://data.krx.co.kr/comm/bldAttendant/executeForResourceBundle.cmd"
+    "?baseName=krx.mdc.i18n.component&key=B128.bld"
+)
+_KRX_LISTING_CACHE_URL = (
+    "https://raw.githubusercontent.com/FinanceData/fdr_krx_data_cache"
+    "/refs/heads/master/data/listing/krx/{date}.csv"
+)
+_KRX_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Referer": "https://data.krx.co.kr/contents/MDC/MDI/outerLoader/index.cmd",
+}
+# 캐시 지연을 흡수하기 위해 거슬러 올라갈 최대 일수 (주말+연휴+캐시 지연 여유).
+_KRX_LISTING_LOOKBACK_DAYS = 10
+
 _listing_cache: pd.DataFrame | None = None
 
 
-def _krx_listing() -> pd.DataFrame:
+def _krx_latest_work_date():
+    """KRX가 보고하는 최신 영업일. 실패하면 KST 오늘 날짜로 폴백."""
+    try:
+        r = requests.get(_KRX_WORKDATE_URL, headers=_KRX_HEADERS, timeout=10)
+        date_str = r.json()["result"]["output"][0]["max_work_dt"]
+        return datetime.strptime(date_str, "%Y%m%d").date()
+    except Exception as e:
+        logger.warning("KRX work date probe failed, using KST today: %s", e)
+        return _kst_date(0)
+
+
+def get_krx_listing() -> pd.DataFrame:
+    """KRX 전종목 시세 DataFrame (Code, Name, Market, Close, ChagesRatio,
+    Volume, Amount, Marcap 등). 프로세스 1회 캐싱.
+
+    가장 최근 영업일부터 과거로 ``_KRX_LISTING_LOOKBACK_DAYS``일까지 캐시를 탐색해
+    존재하는 가장 최신 스냅샷을 반환한다. 모두 없으면 RuntimeError.
+    """
     global _listing_cache
-    if _listing_cache is None:
-        _listing_cache = fdr.StockListing("KRX")
-    return _listing_cache
+    if _listing_cache is not None:
+        return _listing_cache
+
+    start = _krx_latest_work_date()
+    last_error: Exception | None = None
+    for days_ago in range(_KRX_LISTING_LOOKBACK_DAYS + 1):
+        day = start - timedelta(days=days_ago)
+        url = _KRX_LISTING_CACHE_URL.format(date=day.strftime("%Y-%m-%d"))
+        try:
+            resp = requests.get(url, headers=_KRX_HEADERS, timeout=15)
+            if resp.status_code != 200 or len(resp.content) < 100:
+                continue
+            df = pd.read_csv(
+                io.StringIO(resp.text), index_col=0, dtype={"Code": str}
+            ).reset_index(drop=True)
+            if df.empty:
+                continue
+            _listing_cache = df
+            logger.info("KRX listing loaded for %s (%d rows)", day, len(df))
+            return df
+        except Exception as e:  # 네트워크/파싱 오류는 다음 날짜로 폴백
+            last_error = e
+            continue
+
+    raise RuntimeError(
+        f"KRX listing unavailable: no cache snapshot in last "
+        f"{_KRX_LISTING_LOOKBACK_DAYS} days from {start} (last error: {last_error})"
+    )
+
+
+def _krx_listing() -> pd.DataFrame:
+    return get_krx_listing()
 
 
 def _by_market(market: str) -> pd.DataFrame:

@@ -17,6 +17,7 @@ import pytz
 import requests
 
 from . import config
+from .data_kr import get_krx_listing
 from .data_kr_fundamentals import fetch_fundamentals
 
 logger = logging.getLogger(__name__)
@@ -263,7 +264,7 @@ def _resolve_ticker_for_note(query: str) -> tuple[str, str] | None:
     q = query.strip()
     if q.isdigit() and len(q) == 6:
         try:
-            df = fdr.StockListing("KRX")
+            df = get_krx_listing()
             row = df[df["Code"] == q]
             if not row.empty:
                 return q, str(row.iloc[0]["Name"])
@@ -272,7 +273,7 @@ def _resolve_ticker_for_note(query: str) -> tuple[str, str] | None:
         return q, q
     # 종목명 매칭
     try:
-        df = fdr.StockListing("KRX")
+        df = get_krx_listing()
         row = df[df["Name"] == q]
         if not row.empty:
             return str(row.iloc[0]["Code"]), q

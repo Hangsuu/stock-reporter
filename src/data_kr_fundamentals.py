@@ -19,6 +19,7 @@ import pytz
 import requests
 
 from . import config
+from .data_kr import get_krx_listing
 
 logger = logging.getLogger(__name__)
 KST = pytz.timezone("Asia/Seoul")
@@ -111,7 +112,7 @@ def fetch_fundamentals(code: str) -> dict[str, Any] | None:
 
 
 def collect_candidate_pool(top_n: int = 300, max_workers: int = 16) -> list[dict[str, Any]]:
-    listing = fdr.StockListing("KRX")
+    listing = get_krx_listing()
     listing = listing[listing["Market"].isin(["KOSPI", "KOSDAQ"])]
     listing = listing.dropna(subset=["Marcap"]).nlargest(top_n, "Marcap")
     codes = listing["Code"].tolist()

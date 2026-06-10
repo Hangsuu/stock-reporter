@@ -19,12 +19,12 @@ import time
 from datetime import datetime
 from typing import Callable
 
-import FinanceDataReader as fdr
 import pytz
 import requests
 
 from . import config, reporter, scheduler
 from .analyst import CONSULTANT_SYSTEM_PROMPT, chat as claude_chat
+from .data_kr import get_krx_listing
 from .notifier import send_message
 
 logger = logging.getLogger(__name__)
@@ -65,7 +65,7 @@ def _name_to_code() -> dict[str, str]:
     global _listing_cache
     with _listing_lock:
         if _listing_cache is None:
-            df = fdr.StockListing("KRX")
+            df = get_krx_listing()
             df = df[df["Market"].isin(["KOSPI", "KOSDAQ", "KONEX"])]
             _listing_cache = dict(zip(df["Name"], df["Code"]))
     return _listing_cache
@@ -167,7 +167,7 @@ def _resolve_ticker_or_code(query: str) -> tuple[str, str] | None:
     if q.isdigit() and 1 <= len(q) <= 6:
         code = q.zfill(6)
         try:
-            df = fdr.StockListing("KRX")
+            df = get_krx_listing()
             row = df[df["Code"] == code]
             if not row.empty:
                 return code, str(row.iloc[0]["Name"])

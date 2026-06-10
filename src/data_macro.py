@@ -4,9 +4,16 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from .data_kr import collect_index_summary
 from .data_us import _bulk_quotes
 
 logger = logging.getLogger(__name__)
+
+# Yahoo(yfinance)는 한국 지수 일봉을 간헐적으로 누락/지연시킨다
+# (예: 2026-06-09 ^KS11 일봉 누락 → 장 시작 전 07:00 실행 시 06-08이 최신으로 잡혀 "이틀전" 표시).
+# 한국 지수는 Naver 기반 collect_index_summary로 덮어써 최신 종가를 보장한다.
+# 매핑: yfinance 티커 → collect_index_summary의 code
+_KR_INDEX_YF_TO_CODE: dict[str, str] = {"^KS11": "KS11", "^KQ11": "KQ11"}
 
 # (티커, 한글명, 카테고리, 단위)
 MACRO_INDICATORS: list[tuple[str, str, str, str]] = [
@@ -52,6 +59,22 @@ def collect_macro_indicators() -> dict[str, Any]:
     """모든 매크로 지표의 전일 종가 + 변동률 dict 반환."""
     tickers = [t for t, _, _, _ in MACRO_INDICATORS]
     quotes = _bulk_quotes(tickers, period="5d")
+
+    # 한국 지수는 Yahoo 누락/지연 회피를 위해 Naver(FDR) 데이터로 덮어쓴다.
+    try:
+        kr_by_code = {x["code"]: x for x in collect_index_summary()}
+        for yf_ticker, code in _KR_INDEX_YF_TO_CODE.items():
+            x = kr_by_code.get(code)
+            if x:
+                quotes[yf_ticker] = {
+                    "close": x["close"],
+                    "prev_close": x["prev_close"],
+                    "change": x["change"],
+                    "change_pct": x["change_pct"],
+                    "volume": x["volume"],
+                }
+    except Exception as e:
+        logger.warning("KR index override failed, keeping yfinance values: %s", e)
 
     rows: list[dict[str, Any]] = []
     by_category: dict[str, list[dict]] = {}
