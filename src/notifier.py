@@ -4,7 +4,9 @@ from __future__ import annotations
 import logging
 import re
 import time
+from typing import Callable
 
+import certifi
 import requests
 
 from . import config
@@ -14,6 +16,43 @@ logger = logging.getLogger(__name__)
 API_BASE = "https://api.telegram.org/bot"
 HARD_LIMIT = 4096
 SAFE_LIMIT = 4000
+
+# 시스템 OpenSSL 인증서 경로(환경마다 다름)가 아닌 certifi 번들을 명시적으로 사용한다.
+# 일부 환경에서 "unable to get local issuer certificate" 검증 실패를 줄인다.
+_CA_BUNDLE = certifi.where()
+
+# 일시적 네트워크 장애(SSL 핸드셰이크 실패, DNS 미해결, 연결 리셋, 타임아웃)는
+# wake-from-sleep / 네트워크 전환 직후에 자주 발생한다. 백오프하며 재시도해 흡수한다.
+_RETRY_BACKOFF_SECONDS = (5, 15)  # 시도 사이 대기 → 총 3회 시도
+_TRANSIENT_NETWORK_ERRORS = (
+    requests.exceptions.SSLError,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+)
+
+
+def _request_with_retry(do_request: Callable[[], requests.Response]) -> requests.Response:
+    """do_request()를 호출하고 일시적 네트워크 오류면 백오프 후 재시도한다.
+
+    HTTP 상태 오류(4xx/5xx)는 여기서 다루지 않는다 — 호출부가 status_code로 처리.
+    do_request는 재시도마다 새로 실행되므로 파일 핸들 등은 클로저 안에서 새로 열어야 한다.
+    """
+    last_err: Exception | None = None
+    total_attempts = len(_RETRY_BACKOFF_SECONDS) + 1
+    for attempt in range(1, total_attempts + 1):
+        try:
+            return do_request()
+        except _TRANSIENT_NETWORK_ERRORS as e:
+            last_err = e
+            if attempt < total_attempts:
+                wait = _RETRY_BACKOFF_SECONDS[attempt - 1]
+                logger.warning(
+                    "telegram network error (%s, attempt %d/%d), retrying in %ds",
+                    type(e).__name__, attempt, total_attempts, wait,
+                )
+                time.sleep(wait)
+    assert last_err is not None
+    raise last_err
 
 
 def send_message(text: str, parse_mode: str | None = "HTML", mode: str | None = None) -> list[dict]:
@@ -45,16 +84,9 @@ def _send_one(text: str, parse_mode: str | None, token: str, chat_id: str) -> di
     if parse_mode:
         payload["parse_mode"] = parse_mode
 
-    # Retry once on network timeout (wake-from-sleep can leave network slow).
-    for attempt in (1, 2):
-        try:
-            r = requests.post(url, json=payload, timeout=30)
-            break
-        except requests.exceptions.Timeout:
-            if attempt == 2:
-                raise
-            logger.warning("sendMessage timed out (attempt 1/2), retrying after 5s...")
-            time.sleep(5)
+    r = _request_with_retry(
+        lambda: requests.post(url, json=payload, timeout=30, verify=_CA_BUNDLE)
+    )
     if r.status_code != 200:
         logger.error("Telegram API error %s: %s", r.status_code, r.text)
         r.raise_for_status()
@@ -125,7 +157,7 @@ def _escape_unsafe_lt(text: str) -> str:
 
 def get_me() -> dict:
     url = f"{API_BASE}{config.TELEGRAM_BOT_TOKEN}/getMe"
-    r = requests.get(url, timeout=10)
+    r = _request_with_retry(lambda: requests.get(url, timeout=10, verify=_CA_BUNDLE))
     r.raise_for_status()
     return r.json()
 
@@ -138,7 +170,7 @@ def send_photo(
 ) -> dict:
     """Send a photo with optional HTML caption (max 1024 chars per Telegram).
 
-    Retries once on network timeout (wake-from-sleep can leave network slow).
+    Retries transient network errors (wake-from-sleep can leave network slow/unresolved).
     """
     token, chat_id = config.get_credentials(mode)
     url = f"{API_BASE}{token}/sendPhoto"
@@ -148,16 +180,14 @@ def send_photo(
         if parse_mode:
             data["parse_mode"] = parse_mode
 
-    for attempt in (1, 2):
-        try:
-            with open(photo_path, "rb") as f:
-                r = requests.post(url, files={"photo": f}, data=data, timeout=180)
-            break
-        except requests.exceptions.Timeout:
-            if attempt == 2:
-                raise
-            logger.warning("sendPhoto timed out (attempt 1/2), retrying after 5s...")
-            time.sleep(5)
+    # 파일 핸들은 재시도마다 새로 열어야 하므로 클로저 안에서 open한다.
+    def _post() -> requests.Response:
+        with open(photo_path, "rb") as f:
+            return requests.post(
+                url, files={"photo": f}, data=data, timeout=180, verify=_CA_BUNDLE
+            )
+
+    r = _request_with_retry(_post)
     if r.status_code != 200:
         logger.error("sendPhoto failed %s: %s", r.status_code, r.text)
         r.raise_for_status()

@@ -1419,10 +1419,14 @@ def analyze(market: str, snapshot: dict, user_note: str | None = None) -> str:
             )
             if result.returncode == 0 and result.stdout.strip():
                 break  # success
-            # Bad result: log and retry
+            # Bad result: log and retry.
+            # claude -p는 에러 메시지를 stdout으로 내보내고 exit!=0 하는 경우가 많다
+            # (rate limit, overloaded, auth 등). stderr만 찍으면 원인이 비어 보이므로
+            # stdout 앞부분도 함께 남겨 재발 시 추적 가능하게 한다.
             last_err = (
                 f"exit={result.returncode} "
                 f"stdout_len={len(result.stdout)} "
+                f"stdout={result.stdout[:200]!r} "
                 f"stderr={result.stderr[:200]!r}"
             )
             logger.warning("claude -p bad result (attempt %d/3): %s", attempt, last_err)
