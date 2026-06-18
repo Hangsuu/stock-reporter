@@ -126,7 +126,9 @@ def _pick_chart_subject() -> dict:
     return random.choice(eligible)
 
 
-def _run_kr_board(*, forced_ticker: str | None, dry_run: bool) -> str | None:
+def _run_kr_board(
+    *, forced_ticker: str | None, dry_run: bool, output_mode: str = "kr_deepdive"
+) -> str | None:
     if not forced_ticker:
         raise ValueError("kr_board requires forced_ticker")
     ticker = forced_ticker
@@ -150,12 +152,14 @@ def _run_kr_board(*, forced_ticker: str | None, dry_run: bool) -> str | None:
         logger.info("[DRY-RUN] kr_board (%d posts):\n%s", len(posts), message)
         return message
 
-    send_message(message, mode="kr_deepdive")
+    send_message(message, mode=output_mode)
     logger.info("kr_board sent for %s (posts=%d)", ticker, len(posts))
     return message
 
 
-def _run_kr_quarterly(*, forced_ticker: str | None, dry_run: bool) -> str | None:
+def _run_kr_quarterly(
+    *, forced_ticker: str | None, dry_run: bool, output_mode: str = "kr_deepdive"
+) -> str | None:
     if not forced_ticker:
         raise ValueError("kr_quarterly requires forced_ticker (분기실적은 사용자 종목 지정 필요)")
     ticker = forced_ticker
@@ -173,8 +177,7 @@ def _run_kr_quarterly(*, forced_ticker: str | None, dry_run: bool) -> str | None
         logger.info("[DRY-RUN] quarterly:\n%s", message)
         return message
 
-    # Quarterly는 Deepdive 봇 채널과 같이 사용
-    send_message(message, mode="kr_deepdive")
+    send_message(message, mode=output_mode)
     logger.info("kr_quarterly sent for %s", ticker)
     return message
 
@@ -185,6 +188,7 @@ def _run_kr_deepdive(
     dry_run: bool,
     user_note: str | None,
     user_entry_price: float | None = None,
+    output_mode: str = "kr_deepdive",
 ) -> str | None:
     if forced_ticker:
         logger.info("Forced ticker: %s (skipping selection)", forced_ticker)
@@ -221,8 +225,8 @@ def _run_kr_deepdive(
 
     if chart_path:
         caption = f"🔍 <b>Deep-Dive</b> — {name} (<code>{ticker}</code>)"
-        send_photo(chart_path, caption=caption, mode="kr_deepdive")
-    send_message(full_message, mode="kr_deepdive")
+        send_photo(chart_path, caption=caption, mode=output_mode)
+    send_message(full_message, mode=output_mode)
     # Forced ticker calls bypass dedup history (user explicitly requested it)
     if not forced_ticker:
         record_pick("kr_deepdive", ticker, name)
@@ -370,8 +374,11 @@ def run(
     forced_tickers: tuple[str, str] | None = None,
     user_note: str | None = None,
     user_entry_price: float | None = None,
+    output_mode: str | None = None,
 ) -> str | None:
     config.assert_env()
+    # 사용자 종목 분석 결과를 보낼 채널 (None이면 기본 Deepdive 채널).
+    deepdive_output = output_mode or "kr_deepdive"
 
     # insight·radar·pulse·chart_lesson·macro는 주말에도 실행 (학습/브리핑/온디맨드)
     weekend_skipped_modes = ("insight", "radar", "pulse", "chart_lesson", "macro")
@@ -406,11 +413,16 @@ def run(
             dry_run=dry_run,
             user_note=user_note,
             user_entry_price=user_entry_price,
+            output_mode=deepdive_output,
         )
     elif market == "kr_quarterly":
-        return _run_kr_quarterly(forced_ticker=forced_ticker, dry_run=dry_run)
+        return _run_kr_quarterly(
+            forced_ticker=forced_ticker, dry_run=dry_run, output_mode=deepdive_output
+        )
     elif market == "kr_board":
-        return _run_kr_board(forced_ticker=forced_ticker, dry_run=dry_run)
+        return _run_kr_board(
+            forced_ticker=forced_ticker, dry_run=dry_run, output_mode=deepdive_output
+        )
     elif market == "insight":
         from .picks_history import recent_tickers
         now = datetime.now(KST)

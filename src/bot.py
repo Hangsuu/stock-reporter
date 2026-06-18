@@ -37,6 +37,7 @@ MAX_CHOICES = 10
 # 나머지 봇은 "main에서 입력했을 때 결과가 그 봇 채널로 가는" 명령만 받는다.
 # 응답은 _handle_command(reply_mode=...)로 입력받은 봇 채널에 회신된다.
 _DEEPDIVE_BOT_COMMANDS = frozenset({"/run"})
+_CHART_BOT_COMMANDS = frozenset({"/run"})
 _NOTE_BOT_COMMANDS = frozenset({"/status", "/update", "/retarget"})
 # /status, /check은 모니터 봇 핸들러에서 직접 처리(같은 채널 중복 confirmation 회피).
 _MONITOR_BOT_COMMANDS = frozenset({"/update", "/retarget"})
@@ -212,19 +213,32 @@ def _start_analysis(
     reply_mode: str | None,
     entry_price: float | None = None,
     command_mode: str | None = None,
+    result_mode: str | None = None,
 ) -> None:
-    """Send 'analyzing' notice, then run kr_deepdive (or quarterly variant)."""
+    """Send 'analyzing' notice, then run kr_deepdive (or quarterly variant).
+
+    result_mode: 분석 결과를 보낼 채널. None이면 기본 Deepdive 채널로 발송한다.
+                 이 채널에서 검색하고 같은 채널로 결과를 받으려면 reply_mode와 같게 준다.
+    """
+    # result_mode가 지정되면 결과는 그 채널(=입력한 채널)로 도착한다.
+    dest_note = (
+        "결과는 이 채널에 도착합니다."
+        if result_mode
+        else "결과는 <b>@HarrisonStockDeepdive_bot</b> 채널에 도착합니다."
+    )
     if command_mode in ("kr_quarterly", "kr_board"):
         label = "분기실적 분석" if command_mode == "kr_quarterly" else "종토방 분위기 분석"
         emoji = "📊" if command_mode == "kr_quarterly" else "💬"
         send_message(
-            f"{emoji} <b>{name}</b> (<code>{ticker}</code>) {label} 중... 약 1~2분\n"
-            f"결과는 <b>@HarrisonStockDeepdive_bot</b> 채널에 도착합니다.",
+            f"{emoji} <b>{name}</b> (<code>{ticker}</code>) {label} 중... 약 1~2분\n{dest_note}",
             mode=reply_mode,
         )
         logger.info("%s %s (%s) mode=%s chat=%s", command_mode, name, ticker, reply_mode, chat_id)
         try:
-            reporter.run(command_mode, skip_weekend_check=True, forced_ticker=ticker)
+            reporter.run(
+                command_mode, skip_weekend_check=True, forced_ticker=ticker,
+                output_mode=result_mode,
+            )
         except Exception as e:
             logger.exception("%s failed", command_mode)
             send_message(
@@ -235,13 +249,12 @@ def _start_analysis(
 
     price_note = f" / 진입가 <code>{int(entry_price):,}원</code> 기준 분석" if entry_price else ""
     send_message(
-        f"🔍 <b>{name}</b> (<code>{ticker}</code>){price_note} 분석 중... 약 1~2분\n"
-        f"결과는 <b>@HarrisonStockDeepdive_bot</b> 채널에 도착합니다.",
+        f"🔍 <b>{name}</b> (<code>{ticker}</code>){price_note} 분석 중... 약 1~2분\n{dest_note}",
         mode=reply_mode,
     )
     logger.info(
-        "Analyzing %s (%s) entry=%s mode=%s chat=%s",
-        name, ticker, entry_price, reply_mode, chat_id,
+        "Analyzing %s (%s) entry=%s mode=%s result=%s chat=%s",
+        name, ticker, entry_price, reply_mode, result_mode, chat_id,
     )
     try:
         reporter.run(
@@ -249,6 +262,7 @@ def _start_analysis(
             skip_weekend_check=True,
             forced_ticker=ticker,
             user_entry_price=entry_price,
+            output_mode=result_mode,
         )
     except Exception as e:
         logger.exception("analysis failed")
@@ -258,7 +272,10 @@ def _start_analysis(
         )
 
 
-def _try_pick_from_choices(bot_label: str, chat_id: str, text: str, *, reply_mode: str | None) -> bool:
+def _try_pick_from_choices(
+    bot_label: str, chat_id: str, text: str, *, reply_mode: str | None,
+    result_mode: str | None = None,
+) -> bool:
     if not (text.isdigit() and 1 <= int(text) <= MAX_CHOICES):
         return False
     n = int(text)
@@ -269,11 +286,14 @@ def _try_pick_from_choices(bot_label: str, chat_id: str, text: str, *, reply_mod
     ticker, name = choices[n - 1]
     with _pending_lock:
         _pending_choices.pop((bot_label, chat_id), None)
-    _start_analysis(chat_id, ticker, name, reply_mode=reply_mode)
+    _start_analysis(chat_id, ticker, name, reply_mode=reply_mode, result_mode=result_mode)
     return True
 
 
-def _try_resolve_or_list(bot_label: str, chat_id: str, text: str, *, reply_mode: str | None) -> bool:
+def _try_resolve_or_list(
+    bot_label: str, chat_id: str, text: str, *, reply_mode: str | None,
+    result_mode: str | None = None,
+) -> bool:
     """Single match → analyze. Multi match → show list. No match → False.
 
     Supports:
@@ -296,6 +316,7 @@ def _try_resolve_or_list(bot_label: str, chat_id: str, text: str, *, reply_mode:
             reply_mode=reply_mode,
             entry_price=entry_price,
             command_mode=command_mode,
+            result_mode=result_mode,
         )
         return True
 
@@ -743,6 +764,50 @@ def _handle_text_deepdive(chat_id: str, text: str) -> None:
     )
 
 
+def _handle_text_chart(chat_id: str, text: str) -> None:
+    """Chart 봇: 차트 채널에서 종목명/코드를 보내면 그 자리에서 바로 분석.
+
+    안내·결과 모두 같은 chart 채널로 보낸다 (result_mode="chart_lesson").
+    """
+    text = text.strip()
+
+    if text.lower() in ("/start", "/help", "도움말"):
+        send_message(
+            "📈 <b>Chart 봇 — 종목 즉시 분석</b>\n\n"
+            "차트를 보다가 궁금한 종목을 바로 보내보세요. 분석 결과가 <b>이 채널</b>로 도착합니다.\n\n"
+            "<b>일반 분석</b>: <code>삼성전자</code>, <code>005930</code>\n"
+            "<b>진입가 분석</b>: <code>삼성전자 263000</code> → 익절/손절 지침\n"
+            "<b>분기실적</b>: <code>삼성전자 분기실적</code> → 매출/영업이익/FCF/ROE\n"
+            "<b>종토방</b>: <code>삼성전자 종토방</code> → 매수/매도 심리·공포/환희 지수\n\n"
+            "부분 검색 (예: <code>현대</code>) 시 후보 + 번호 선택.\n"
+            "분석은 약 1~2분 소요.",
+            mode="chart_lesson",
+        )
+        return
+
+    # 슬래시 명령: /run 등 (응답은 chart 채널로)
+    first = text.split(maxsplit=1)[0].lower() if text else ""
+    if first in _CHART_BOT_COMMANDS:
+        _handle_command(text, reply_mode="chart_lesson")
+        return
+
+    if _try_pick_from_choices(
+        "chart", chat_id, text, reply_mode="chart_lesson", result_mode="chart_lesson"
+    ):
+        return
+
+    if _try_resolve_or_list(
+        "chart", chat_id, text, reply_mode="chart_lesson", result_mode="chart_lesson"
+    ):
+        return
+
+    send_message(
+        f"❌ '<code>{text}</code>' 종목을 찾지 못했습니다.\n"
+        "정확한 한국어 종목명 또는 6자리 코드를 보내주세요.",
+        mode="chart_lesson",
+    )
+
+
 # ── Polling 루프 ──────────────────────────────────────────────
 def _poll_bot(label: str, token: str, expected_chat_id: str, handler: Callable[[str, str], None]) -> None:
     logger.info("[%s] Polling start. expected_chat=%s", label, expected_chat_id)
@@ -804,6 +869,9 @@ def run_poll_loop() -> None:
     monitor_token, monitor_chat = config.get_credentials("monitor")
     monitor_separate = (monitor_token and monitor_token != main_token)
 
+    chart_token, chart_chat = config.get_credentials("chart_lesson")
+    chart_separate = (chart_token and chart_token != main_token)
+
     threads: list[threading.Thread] = []
 
     main_t = threading.Thread(
@@ -853,6 +921,16 @@ def run_poll_loop() -> None:
         )
         m_t.start()
         threads.append(m_t)
+
+    if chart_separate:
+        logger.info("Chart bot polling (separate). chat=%s", chart_chat)
+        chart_t = threading.Thread(
+            target=_poll_bot,
+            args=("chart", chart_token, chart_chat, _handle_text_chart),
+            daemon=True,
+        )
+        chart_t.start()
+        threads.append(chart_t)
 
     # Block on main thread (KeepAlive will restart if it dies)
     main_t.join()
