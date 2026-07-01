@@ -330,6 +330,20 @@ def append_to_sheet(row: dict) -> bool:
         return False
 
 
+def append_strategy_to_sheet(date: str, tag: str, strategy: str) -> bool:
+    """전략 로그를 같은 Apps Script 웹훅으로 POST.
+
+    trade 기록과 같은 엔드포인트를 쓰되 ``type="strategy"``로 구분한다.
+    Apps Script가 이 필드를 보고 '전략' 탭으로 라우팅한다 (매매 기록엔 type 없음 → 기존 동작 유지).
+    """
+    return append_to_sheet({
+        "type": "strategy",
+        "date": date,
+        "tag": tag,
+        "strategy": strategy,
+    })
+
+
 def handle_note(text: str) -> str:
     """Parse note + enrich + send to sheet. Return reply message."""
     parsed = parse_note(text)
@@ -434,4 +448,73 @@ def handle_note(text: str) -> str:
     lines.append("")
     lines.append(f"📋 시트 기록: {'✅ 성공' if sheet_ok else '❌ 실패 (NOTE_SHEET_URL 확인)'}")
 
+    return "\n".join(lines)
+
+
+# ── 전략 로그 (날짜 + 태그 + 전략) ──────────────────────────────
+_STRATEGY_TRIGGERS = ("전략", "strategy")
+_STRATEGY_BRACKET_RE = re.compile(r"^\[([^\]]{1,30})\]\s*(.+)$", re.DOTALL)
+_STRATEGY_SEP_RE = re.compile(r"^(\S{1,30})\s*[|:]\s*(.+)$", re.DOTALL)
+
+
+def is_strategy_message(text: str) -> bool:
+    """첫 토큰이 전략 트리거(전략/strategy, 선택적 '/')인지."""
+    head = text.strip().split(maxsplit=1)
+    if not head:
+        return False
+    return head[0].lower().lstrip("/") in _STRATEGY_TRIGGERS
+
+
+def parse_strategy(text: str) -> dict:
+    """'전략 #단기 반도체 비중축소' → {'tag': '단기', 'strategy': '반도체 비중축소'}.
+
+    태그 표기 (우선순위):
+      1) [단기] 내용        → 대괄호
+      2) #단기 내용         → 해시 마커
+      3) 단기 | 내용        → | 또는 : 구분자
+      4) (표기 없음)        → 태그 공백, 전체가 전략 (엉뚱한 첫 단어를 태그로 오인하지 않음)
+    """
+    parts = text.strip().split(maxsplit=1)
+    body = parts[1].strip() if len(parts) > 1 else ""
+    if not body:
+        return {"tag": "", "strategy": ""}
+
+    m = _STRATEGY_BRACKET_RE.match(body)
+    if m:
+        return {"tag": m.group(1).strip(), "strategy": m.group(2).strip()}
+
+    if body.startswith("#"):
+        toks = body[1:].split(maxsplit=1)
+        return {"tag": toks[0].strip(), "strategy": (toks[1].strip() if len(toks) > 1 else "")}
+
+    m = _STRATEGY_SEP_RE.match(body)
+    if m:
+        return {"tag": m.group(1).strip(), "strategy": m.group(2).strip()}
+
+    return {"tag": "", "strategy": body}
+
+
+def handle_strategy(text: str) -> str:
+    """전략 메시지를 파싱해 '전략' 탭에 기록. 봇 응답 문자열 반환."""
+    parsed = parse_strategy(text)
+    if not parsed["strategy"]:
+        return (
+            "❌ 전략 내용이 비었습니다. 형식:\n"
+            "<code>전략 #단기 반도체 비중 축소, 현금 30% 확보</code>\n"
+            "<code>전략 [중기] 배당주 분할 매수</code>\n"
+            "<code>전략 반도체 비중 축소</code> (태그 없이)"
+        )
+
+    now = datetime.now(KST)
+    date_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    ok = append_strategy_to_sheet(date_str, parsed["tag"], parsed["strategy"])
+
+    lines = ["🧭 <b>전략 기록</b>", f"📅 {date_str}"]
+    if parsed["tag"]:
+        lines.append(f"🏷️ 태그: <b>{parsed['tag']}</b>")
+    lines.append(f"📝 {parsed['strategy']}")
+    lines.append("")
+    lines.append(
+        f"📋 시트 기록: {'✅ 성공' if ok else '❌ 실패 (NOTE_SHEET_URL / Apps Script 확인)'}"
+    )
     return "\n".join(lines)

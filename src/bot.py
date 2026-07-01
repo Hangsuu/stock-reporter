@@ -625,6 +625,10 @@ def _handle_text_note(chat_id: str, text: str) -> None:
             "▸ PER, PBR, ROE(추정), RSI(14) 계산\n"
             "▸ 매수의 경우 1차 익절(+7%) / 2차 익절(+15%) / 손절(-5%) 가격 계산\n"
             "▸ 구글 시트에 자동 기록\n\n"
+            "<b>전략 기록</b> (같은 시트의 '전략' 탭)\n"
+            "<code>전략 #단기 반도체 비중 축소, 현금 30% 확보</code>\n"
+            "<code>전략 [중기] 배당주 분할 매수</code>\n"
+            "<code>전략 반도체 비중 축소</code> (태그 없이)\n\n"
             "<b>명령어</b>\n"
             "▸ <code>/status</code> — 보유 포지션 평가손익 리포트\n"
             "▸ <code>/update 005930 tp1=320000 sl=295000</code> — 시트 값 직접 수정\n"
@@ -640,7 +644,13 @@ def _handle_text_note(chat_id: str, text: str) -> None:
         _handle_command(text, reply_mode="note")
         return
 
-    from .note_handler import handle_note
+    from .note_handler import handle_note, handle_strategy, is_strategy_message
+
+    # 전략 로그: '전략 ...' → 날짜+태그+전략을 '전략' 탭에 기록
+    if is_strategy_message(text):
+        send_message(handle_strategy(text), mode="note")
+        return
+
     reply = handle_note(text)
     send_message(reply, mode="note")
 
