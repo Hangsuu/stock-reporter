@@ -134,6 +134,9 @@ def _run_kr_board(
     ticker = forced_ticker
     from .data_kr_board import fetch_board_posts
     posts = fetch_board_posts(ticker, pages=8)
+    if not posts:
+        # 0건으로 분석을 돌리면 근거 없는 리포트가 그대로 나간다.
+        raise RuntimeError(f"종토방 게시글 0건 ({ticker}) — 수집 실패이거나 글이 없는 종목입니다")
     fund = fetch_fundamentals(ticker) or {}
     name = fund.get("name") or ticker
 
