@@ -16,6 +16,7 @@ import json
 import logging
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -162,23 +163,59 @@ def _replay_avg_cost(txns: list[tuple[datetime, str, float, int]]) -> tuple[int,
     return qty, avg
 
 
+class SheetReadError(RuntimeError):
+    """시트(Apps Script doGet)를 읽지 못했다. 빈 시트('보유 종목 없음')와 구분하려고 따로 둔다."""
+
+
+# 평소 응답은 3~4초지만 15초를 넘긴 적이 있다 (2026-09-18 16:00 일일 리포트).
+_SHEET_TIMEOUT = (10, 30)  # (connect, read) 초
+_SHEET_RETRY_BACKOFF = (5, 15)  # 시도 사이 대기 → 총 3회 시도
+
+
+def _sheet_error_summary(e: Exception) -> str:
+    """알림에 실을 오류 요약. 예외 원문에는 웹앱 URL(배포 ID)이 들어 있어 종류만 남긴다."""
+    if isinstance(e, requests.HTTPError) and e.response is not None:
+        return f"HTTP {e.response.status_code}"
+    if isinstance(e, ValueError):  # JSON 파싱 실패, rows 누락
+        return f"응답 형식 오류 ({e})"
+    return type(e).__name__
+
+
+def _fetch_sheet_rows() -> list[dict]:
+    """Apps Script doGet으로 시트 전체 행을 받는다. 일시 오류는 백오프하며 재시도한다.
+
+    전부 실패하면 SheetReadError를 던진다 — 빈 목록을 돌려주면 호출부가 '보유 종목 없음'으로 오인한다.
+    """
+    attempts = len(_SHEET_RETRY_BACKOFF) + 1
+    last_err: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            r = requests.get(config.NOTE_SHEET_URL, timeout=_SHEET_TIMEOUT)
+            r.raise_for_status()
+            data = r.json()
+            rows = data.get("rows") if isinstance(data, dict) else None
+            if not isinstance(rows, list):
+                raise ValueError("rows 목록 없음")
+            return rows
+        except (requests.RequestException, ValueError) as e:
+            last_err = e
+            logger.warning("Sheet GET failed (attempt %d/%d): %s", attempt, attempts, e)
+            if attempt < attempts:
+                time.sleep(_SHEET_RETRY_BACKOFF[attempt - 1])
+    assert last_err is not None
+    raise SheetReadError(f"시트 읽기 실패 ({attempts}회 시도): {_sheet_error_summary(last_err)}")
+
+
 def fetch_positions() -> list[dict]:
     """Apps Script doGet으로 시트 전체 받아 ticker별 평단/잔여수량 계산.
 
     Returns: [{ticker, name, avg_price, quantity, last_buy_reason}] (잔여수량 > 0만)
+    Raises: SheetReadError — 시트를 못 읽었을 때. 빈 목록은 '실제로 보유 종목이 없다'는 뜻으로만 쓴다.
     """
     if not config.NOTE_SHEET_URL:
         logger.warning("NOTE_SHEET_URL not configured")
         return []
-    try:
-        r = requests.get(config.NOTE_SHEET_URL, timeout=15)
-        r.raise_for_status()
-        data = r.json()
-    except Exception as e:
-        logger.warning("Sheet GET failed: %s", e)
-        return []
-
-    rows = data.get("rows") or []
+    rows = _fetch_sheet_rows()
     if not rows:
         return []
 
@@ -280,9 +317,15 @@ def _format_target_display(price: float, avg_price: float | None) -> str:
 
 
 def _find_position(ticker: str) -> dict | None:
-    """ticker로 현재 보유 포지션 (avg_price/name) 조회. 없으면 None."""
+    """ticker로 현재 보유 포지션 (avg_price/name) 조회. 없거나 시트를 못 읽으면 None."""
     ticker = _normalize_ticker(ticker)
-    for p in fetch_positions():
+    try:
+        positions = fetch_positions()
+    except SheetReadError as e:
+        # 평단은 '가격 (+%)' 표시용이라, 못 읽어도 수정 요청은 그대로 보낸다 (기존 동작 유지)
+        logger.warning("Position lookup failed, updating without avg price: %s", e)
+        return None
+    for p in positions:
         if p["ticker"] == ticker:
             return p
     return None
