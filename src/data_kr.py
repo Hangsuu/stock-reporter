@@ -81,6 +81,15 @@ _KRX_HEADERS = {
 # 캐시 지연을 흡수하기 위해 거슬러 올라갈 최대 일수 (주말+연휴+캐시 지연 여유).
 _KRX_LISTING_LOOKBACK_DAYS = 10
 
+# 2026-09-14부터 캐시가 새벽(03~05시 KST)에 "오늘 날짜" CSV를 가격 칸이 빈 채로 먼저 올린다
+# (Close="-", Marcap·Volume·ChagesRatio 전부 NaN). 거래일은 정오 무렵 갱신부터 값이 채워지고,
+# 주말·휴장일 CSV는 끝까지 빈 채로 남는다. 이 파일을 쓰면 시총·거래량 기준 선정이 전부
+# 0건이 되므로(chart_lesson 09:20 실패) 종가·시총이 채워진 행이 이 비율 미만이면 건너뛰고
+# 그 전날 스냅샷으로 내려간다.
+_KRX_LISTING_MIN_PRICED_RATIO = 0.9
+# 호출부가 숫자로 읽는 칸. "-" 같은 placeholder는 NaN으로 바꿔 둔다.
+_KRX_NUMERIC_COLUMNS = ("Close", "ChagesRatio", "Volume", "Amount", "Marcap")
+
 _listing_cache: pd.DataFrame | None = None
 
 
@@ -100,7 +109,7 @@ def get_krx_listing() -> pd.DataFrame:
     Volume, Amount, Marcap 등). 프로세스 1회 캐싱.
 
     가장 최근 영업일부터 과거로 ``_KRX_LISTING_LOOKBACK_DAYS``일까지 캐시를 탐색해
-    존재하는 가장 최신 스냅샷을 반환한다. 모두 없으면 RuntimeError.
+    가격이 채워진 가장 최신 스냅샷을 반환한다. 모두 없으면 RuntimeError.
     """
     global _listing_cache
     if _listing_cache is not None:
@@ -120,6 +129,17 @@ def get_krx_listing() -> pd.DataFrame:
             ).reset_index(drop=True)
             if df.empty:
                 continue
+            for col in _KRX_NUMERIC_COLUMNS:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+            priced = min(df["Close"].notna().mean(), df["Marcap"].notna().mean())
+            if priced < _KRX_LISTING_MIN_PRICED_RATIO:
+                logger.info(
+                    "KRX listing for %s has no prices (priced %.0f%%, pre-market or holiday), "
+                    "trying previous day",
+                    day, priced * 100,
+                )
+                continue
             _listing_cache = df
             logger.info("KRX listing loaded for %s (%d rows)", day, len(df))
             return df
@@ -128,7 +148,7 @@ def get_krx_listing() -> pd.DataFrame:
             continue
 
     raise RuntimeError(
-        f"KRX listing unavailable: no cache snapshot in last "
+        f"KRX listing unavailable: no priced cache snapshot in last "
         f"{_KRX_LISTING_LOOKBACK_DAYS} days from {start} (last error: {last_error})"
     )
 
