@@ -4,9 +4,12 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
 from datetime import datetime
 
+import certifi
 import pytz
+import requests
 
 from . import config
 from .analyst import analyze
@@ -40,6 +43,33 @@ def _setup_logging() -> None:
 
 def _is_weekday() -> bool:
     return datetime.now(KST).weekday() < 5
+
+
+# 잠든 사이 놓친 잡을 launchd가 DarkWake(2초~1분) 때 곧바로 실행하면 DNS·TLS가 아직 안 붙어
+# 수집이 전부 즉시 실패한다. 이후 네트워크가 붙으면 빈 데이터로 만든 리포트가 정상처럼 나간다
+# (2026-09-28 us 1058자·us_top20 330자, 평소 약 2800자·1600자). 수집 전에 텔레그램 API에
+# HTTPS로 닿을 때까지 기다린다. 횟수로 세므로 기다리다 다시 잠들어도 깨어 있는 시간만 쓴다.
+_NETWORK_PROBE_URL = "https://api.telegram.org"
+_NETWORK_WAIT_ATTEMPTS = 120  # 5초 간격 → 깨어 있는 시간 기준 최대 약 10분
+_NETWORK_WAIT_INTERVAL_SECONDS = 5
+
+
+def _wait_for_network() -> None:
+    last_err: Exception | None = None
+    for attempt in range(1, _NETWORK_WAIT_ATTEMPTS + 1):
+        try:
+            requests.head(_NETWORK_PROBE_URL, timeout=5, verify=certifi.where())
+            if attempt > 1:
+                logger.info("Network ready after %d attempts", attempt)
+            return
+        except requests.RequestException as e:
+            last_err = e
+            if attempt == 1:
+                logger.warning("Network not ready, waiting (max %d attempts): %s", _NETWORK_WAIT_ATTEMPTS, e)
+            if attempt < _NETWORK_WAIT_ATTEMPTS:
+                time.sleep(_NETWORK_WAIT_INTERVAL_SECONDS)
+    # 여기까지 오면 리포트를 보낼 수도 없다. 빈 데이터 리포트 대신 실패로 끝낸다.
+    raise RuntimeError(f"network unavailable after {_NETWORK_WAIT_ATTEMPTS} attempts: {last_err}")
 
 
 _DAY_KO = ["월", "화", "수", "목", "금", "토", "일"]
@@ -551,6 +581,7 @@ def main() -> None:
     _setup_logging()
 
     try:
+        _wait_for_network()
         run(
             args.market,
             dry_run=args.dry_run,
